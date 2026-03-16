@@ -10,17 +10,13 @@ app.get('/health', (req, res) => {
 
 app.post('/api/v1/families', async (req, res) => {
   const { email } = req.body;
-
   if (!email) {
     res.status(400).json({ error: 'email is required' });
     return;
   }
-
   try {
     const result = await db.query(
-      `INSERT INTO families (email)
-       VALUES ($1)
-       RETURNING id, email, created_at`,
+      `INSERT INTO families (email) VALUES ($1) RETURNING id, email, created_at`,
       [email]
     );
     res.status(201).json(result.rows[0]);
@@ -36,19 +32,111 @@ app.post('/api/v1/families', async (req, res) => {
 
 app.get('/api/v1/families/:id', async (req, res) => {
   const { id } = req.params;
-
   try {
     const result = await db.query(
       `SELECT id, email, created_at FROM families WHERE id = $1`,
       [id]
     );
-
     if (result.rows.length === 0) {
       res.status(404).json({ error: 'family not found' });
       return;
     }
-
     res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'internal server error' });
+  }
+});
+
+app.post('/api/v1/families/:familyId/children', async (req, res) => {
+  const { familyId } = req.params;
+  const { name, age } = req.body;
+  if (!name) {
+    res.status(400).json({ error: 'name is required' });
+    return;
+  }
+  try {
+    const child = await db.query(
+      `INSERT INTO child_profiles (family_id, name, age)
+       VALUES ($1, $2, $3)
+       RETURNING id, family_id, name, age, protection_level, created_at`,
+      [familyId, name, age]
+    );
+    await db.query(
+      `INSERT INTO filter_policies (child_profile_id) VALUES ($1)`,
+      [child.rows[0].id]
+    );
+    res.status(201).json(child.rows[0]);
+  } catch (err: any) {
+    if (err.code === '23503') {
+      res.status(404).json({ error: 'family not found' });
+      return;
+    }
+    console.error(err);
+    res.status(500).json({ error: 'internal server error' });
+  }
+});
+
+app.get('/api/v1/children/:childId', async (req, res) => {
+  const { childId } = req.params;
+  try {
+    const result = await db.query(
+      `SELECT 
+        c.id, c.family_id, c.name, c.age, c.protection_level,
+        p.blocked_categories, p.allowed_domains, p.blocked_domains,
+        p.safe_search_enforce, p.youtube_restrict
+       FROM child_profiles c
+       JOIN filter_policies p ON p.child_profile_id = c.id
+       WHERE c.id = $1`,
+      [childId]
+    );
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'child not found' });
+      return;
+    }
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'internal server error' });
+  }
+});
+
+app.post('/api/v1/devices/register', async (req, res) => {
+  const { family_id, child_profile_id, platform, device_token } = req.body;
+  if (!family_id || !platform || !device_token) {
+    res.status(400).json({ error: 'family_id, platform and device_token are required' });
+    return;
+  }
+  try {
+    const result = await db.query(
+      `INSERT INTO devices (family_id, child_profile_id, platform, device_token, last_seen)
+       VALUES ($1, $2, $3, $4, NOW())
+       ON CONFLICT (device_token)
+       DO UPDATE SET last_seen = NOW(), child_profile_id = $2
+       RETURNING id, family_id, child_profile_id, platform, last_seen`,
+      [family_id, child_profile_id, platform, device_token]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err: any) {
+    if (err.code === '23503') {
+      res.status(404).json({ error: 'family or child profile not found' });
+      return;
+    }
+    console.error(err);
+    res.status(500).json({ error: 'internal server error' });
+  }
+});
+
+app.post('/api/v1/resolve', async (req, res) => {
+  const { domain, device_token } = req.body;
+  if (!domain || !device_token) {
+    res.status(400).json({ error: 'domain and device_token are required' });
+    return;
+  }
+  try {
+    const { resolve } = await import('../resolver/index');
+    const result = await resolve(domain, device_token);
+    res.json(result);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'internal server error' });
