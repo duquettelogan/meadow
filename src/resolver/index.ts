@@ -1,5 +1,7 @@
 import { db } from '../db/connection';
 import { getCachedVerdict, setCachedVerdict } from '../cache/index';
+import { categorizeDomain } from './categorize';
+import { isBlocked } from '../cache/blocklist';
 
 const BLOCKED_CATEGORIES = [
   'adult',
@@ -112,23 +114,18 @@ export async function resolve(
     };
   }
 
-  // Step 4: hardcoded blocklist
-  const blockedCategory = HARDCODED_BLOCKLIST[normalized];
-  if (blockedCategory) {
-    const profileCategories: string[] = profile.blocked_categories?.length > 0
-      ? profile.blocked_categories
-      : BLOCKED_CATEGORIES;
-    if (profileCategories.includes(blockedCategory)) {
-      await setCachedVerdict(deviceToken, normalized, 'block', TTL.block);
-      await logEvent(profile, normalized, 'block', blockedCategory, start);
-      return {
-        domain: normalized,
-        verdict: 'block',
-        category: blockedCategory,
-        reason: 'blocklist',
-        latency_ms: Date.now() - start,
-      };
-    }
+// Step 4: blocklist check
+  const blocklisted = await isBlocked(normalized);
+  if (blocklisted) {
+    await setCachedVerdict(deviceToken, normalized, 'block', TTL.block);
+    await logEvent(profile, normalized, 'block', 'adult', start);
+    return {
+      domain: normalized,
+      verdict: 'block',
+      category: 'adult',
+      reason: 'blocklist',
+      latency_ms: Date.now() - start,
+    };
   }
 
   // Step 5: hardcoded allowlist
