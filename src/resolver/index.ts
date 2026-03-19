@@ -1,4 +1,5 @@
 import { db } from '../db/connection';
+import { getCachedVerdict, setCachedVerdict } from '../cache/index';
 
 const BLOCKED_CATEGORIES = [
   'adult',
@@ -26,6 +27,12 @@ const HARDCODED_ALLOWLIST = new Set([
   'britannica.com',
 ]);
 
+const TTL: Record<string, number> = {
+  allow: 86400,
+  block: 21600,
+  uncategorized: 3600,
+};
+
 export type Verdict = 'allow' | 'block';
 
 export interface ResolverResult {
@@ -41,8 +48,19 @@ export async function resolve(
   deviceToken: string
 ): Promise<ResolverResult> {
   const start = Date.now();
-
   const normalized = domain.toLowerCase().replace(/\.$/, '');
+
+  // Step 0: cache check
+  const cached = await getCachedVerdict(deviceToken, normalized);
+  if (cached) {
+    return {
+      domain: normalized,
+      verdict: cached as Verdict,
+      category: 'cached',
+      reason: 'cache_hit',
+      latency_ms: Date.now() - start,
+    };
+  }
 
   // Step 1: look up device and child profile
   const deviceResult = await db.query(
@@ -66,9 +84,10 @@ export async function resolve(
 
   const profile = deviceResult.rows[0];
 
-  // Step 2: check parent allow overrides first
+  // Step 2: parent allow overrides
   const allowedDomains: string[] = profile.allowed_domains || [];
   if (allowedDomains.includes(normalized)) {
+    await setCachedVerdict(deviceToken, normalized, 'allow', TTL.allow);
     await logEvent(profile, normalized, 'allow', null, start);
     return {
       domain: normalized,
@@ -79,9 +98,10 @@ export async function resolve(
     };
   }
 
-  // Step 3: check parent block overrides
+  // Step 3: parent block overrides
   const blockedDomains: string[] = profile.blocked_domains || [];
   if (blockedDomains.includes(normalized)) {
+    await setCachedVerdict(deviceToken, normalized, 'block', TTL.block);
     await logEvent(profile, normalized, 'block', 'parent_block', start);
     return {
       domain: normalized,
@@ -92,12 +112,14 @@ export async function resolve(
     };
   }
 
-  // Step 4: check hardcoded blocklist
+  // Step 4: hardcoded blocklist
   const blockedCategory = HARDCODED_BLOCKLIST[normalized];
   if (blockedCategory) {
-const profileCategories: string[] = profile.blocked_categories?.length > 0
-  ? profile.blocked_categories
-  : BLOCKED_CATEGORIES;    if (profileCategories.includes(blockedCategory)) {
+    const profileCategories: string[] = profile.blocked_categories?.length > 0
+      ? profile.blocked_categories
+      : BLOCKED_CATEGORIES;
+    if (profileCategories.includes(blockedCategory)) {
+      await setCachedVerdict(deviceToken, normalized, 'block', TTL.block);
       await logEvent(profile, normalized, 'block', blockedCategory, start);
       return {
         domain: normalized,
@@ -109,8 +131,9 @@ const profileCategories: string[] = profile.blocked_categories?.length > 0
     }
   }
 
-  // Step 5: check hardcoded allowlist
+  // Step 5: hardcoded allowlist
   if (HARDCODED_ALLOWLIST.has(normalized)) {
+    await setCachedVerdict(deviceToken, normalized, 'allow', TTL.allow);
     await logEvent(profile, normalized, 'allow', 'safe', start);
     return {
       domain: normalized,
@@ -122,6 +145,7 @@ const profileCategories: string[] = profile.blocked_categories?.length > 0
   }
 
   // Step 6: default allow (freedom-first)
+  await setCachedVerdict(deviceToken, normalized, 'allow', TTL.uncategorized);
   await logEvent(profile, normalized, 'allow', 'uncategorized', start);
   return {
     domain: normalized,
@@ -141,7 +165,7 @@ async function logEvent(
 ) {
   try {
     await db.query(
-      `INSERT INTO dns_events 
+      `INSERT INTO dns_events
         (device_id, child_profile_id, domain, verdict, category, latency_ms)
        VALUES ($1, $2, $3, $4, $5, $6)`,
       [
