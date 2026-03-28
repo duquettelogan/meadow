@@ -1,7 +1,9 @@
 import express from 'express';
+import cors from 'cors';
 import { db } from '../db/connection';
 
 const app = express();
+app.use(cors());
 app.use(express.json());
 
 app.get('/health', (req, res) => {
@@ -176,4 +178,77 @@ app.post('/api/v1/analyze', async (req, res) => {
     res.status(500).json({ error: 'internal server error' });
   }
 });
+
+app.patch('/api/v1/children/:childId/policy', async (req, res) => {
+  const { childId } = req.params;
+  const {
+    blocked_categories,
+    allowed_domains,
+    blocked_domains,
+    safe_search_enforce,
+    restricted_mode,
+  } = req.body;
+
+  try {
+    await db.query(
+      `UPDATE filter_policies SET
+        blocked_categories = COALESCE($1, blocked_categories),
+        allowed_domains = COALESCE($2, allowed_domains),
+        blocked_domains = COALESCE($3, blocked_domains),
+        safe_search_enforce = COALESCE($4, safe_search_enforce),
+        youtube_restrict = COALESCE($5, youtube_restrict)
+       WHERE child_profile_id = $6`,
+      [
+        blocked_categories ? JSON.stringify(blocked_categories) : null,
+        allowed_domains ? JSON.stringify(allowed_domains) : null,
+        blocked_domains ? JSON.stringify(blocked_domains) : null,
+        safe_search_enforce ?? null,
+        restricted_mode ?? null,
+        childId,
+      ]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'internal server error' });
+  }
+});
+
+app.get('/api/v1/children/:childId/alerts', async (req, res) => {
+  const { childId } = req.params;
+
+  try {
+    const result = await db.query(
+      `SELECT domain, verdict, category, reason, latency_ms, resolved_at
+       FROM dns_events
+       WHERE child_profile_id = $1
+       AND verdict = 'block'
+       ORDER BY resolved_at DESC
+       LIMIT 50`,
+      [childId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'internal server error' });
+  }
+});
+
+app.get('/api/v1/children/:childId/devices', async (req, res) => {
+  const { childId } = req.params;
+
+  try {
+    const result = await db.query(
+      `SELECT id, platform, device_token, last_seen
+       FROM devices
+       WHERE child_profile_id = $1`,
+      [childId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'internal server error' });
+  }
+});
+
 export { app };
