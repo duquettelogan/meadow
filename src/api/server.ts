@@ -142,5 +142,38 @@ app.post('/api/v1/resolve', async (req, res) => {
     res.status(500).json({ error: 'internal server error' });
   }
 });
+app.post('/api/v1/analyze', async (req, res) => {
+  const { url, device_token } = req.body;
 
+  if (!url || !device_token) {
+    res.status(400).json({ error: 'url and device_token are required' });
+    return;
+  }
+
+  try {
+    const cacheKey = `content:${url}`;
+    const { createClient } = await import('redis');
+    const redis = createClient({ url: process.env.REDIS_URL });
+    await redis.connect();
+
+    const cached = await redis.get(cacheKey);
+    if (cached) {
+      await redis.disconnect();
+      res.json(JSON.parse(cached));
+      return;
+    }
+
+    const { fetchPageText, analyzeContent } = await import('../resolver/content');
+    const text = await fetchPageText(url);
+    const verdict = await analyzeContent(url, text);
+
+    await redis.set(cacheKey, JSON.stringify(verdict), { EX: 3600 });
+    await redis.disconnect();
+
+    res.json(verdict);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'internal server error' });
+  }
+});
 export { app };
