@@ -2,23 +2,7 @@ import { db } from '../db/connection';
 import { getCachedVerdict, setCachedVerdict } from '../cache/index';
 import { categorizeDomain } from './categorize';
 import { isBlocked } from '../cache/blocklist';
-
-const BLOCKED_CATEGORIES = [
-  'adult',
-  'gambling',
-  'weapons',
-  'drugs',
-  'hate',
-  'malware',
-  'phishing',
-];
-
-const HARDCODED_BLOCKLIST: Record<string, string> = {
-  'pornhub.com': 'adult',
-  'xvideos.com': 'adult',
-  'bet365.com': 'gambling',
-  'draftkings.com': 'gambling',
-};
+import { incrementBlockCounter } from '../db/counters';
 
 const HARDCODED_ALLOWLIST = new Set([
   'google.com',
@@ -52,7 +36,7 @@ export async function resolve(
   const start = Date.now();
   const normalized = domain.toLowerCase().replace(/\.$/, '');
 
-  // Step 0: cache check
+  // Step 0: cache check, fast path for repeat queries from the same device.
   const cached = await getCachedVerdict(deviceToken, normalized);
   if (cached) {
     return {
@@ -64,7 +48,7 @@ export async function resolve(
     };
   }
 
-  // Step 1: look up device and child profile
+  // Step 1: device + filter policy lookup in one query.
   const deviceResult = await db.query(
     `SELECT d.id as device_id, d.child_profile_id,
             p.blocked_categories, p.blocked_domains, p.allowed_domains
@@ -74,6 +58,7 @@ export async function resolve(
     [deviceToken]
   );
 
+  // Unregistered device — fail closed.
   if (deviceResult.rows.length === 0) {
     return {
       domain: normalized,
@@ -85,12 +70,12 @@ export async function resolve(
   }
 
   const profile = deviceResult.rows[0];
+  const childProfileId: string = profile.child_profile_id;
 
-  // Step 2: parent allow overrides
+  // Step 2: parent allowlist wins for explicit allows.
   const allowedDomains: string[] = profile.allowed_domains || [];
   if (allowedDomains.includes(normalized)) {
     await setCachedVerdict(deviceToken, normalized, 'allow', TTL.allow);
-    await logEvent(profile, normalized, 'allow', null, start);
     return {
       domain: normalized,
       verdict: 'allow',
@@ -100,11 +85,11 @@ export async function resolve(
     };
   }
 
-  // Step 3: parent block overrides
+  // Step 3: parent blocklist.
   const blockedDomains: string[] = profile.blocked_domains || [];
   if (blockedDomains.includes(normalized)) {
     await setCachedVerdict(deviceToken, normalized, 'block', TTL.block);
-    await logEvent(profile, normalized, 'block', 'parent_block', start);
+    await incrementBlockCounter(childProfileId, 'parent_block');
     return {
       domain: normalized,
       verdict: 'block',
@@ -114,11 +99,11 @@ export async function resolve(
     };
   }
 
-// Step 4: blocklist check
+  // Step 4: shared blocklist (threat intel / StevenBlack hosts).
   const blocklisted = await isBlocked(normalized);
   if (blocklisted) {
     await setCachedVerdict(deviceToken, normalized, 'block', TTL.block);
-    await logEvent(profile, normalized, 'block', 'adult', start);
+    await incrementBlockCounter(childProfileId, 'adult');
     return {
       domain: normalized,
       verdict: 'block',
@@ -128,10 +113,9 @@ export async function resolve(
     };
   }
 
-  // Step 5: hardcoded allowlist
+  // Step 5: hardcoded allowlist — skip AI call for known-safe domains.
   if (HARDCODED_ALLOWLIST.has(normalized)) {
     await setCachedVerdict(deviceToken, normalized, 'allow', TTL.allow);
-    await logEvent(profile, normalized, 'allow', 'safe', start);
     return {
       domain: normalized,
       verdict: 'allow',
@@ -141,9 +125,42 @@ export async function resolve(
     };
   }
 
-  // Step 6: default allow (freedom-first)
+  // Step 6: AI categorization — closes the "block anything bad" gap for
+  // domains that aren't in any blocklist. Uses Cloudflare Domain Intel.
+  const blockedCategories: string[] = profile.blocked_categories || [];
+  const category = await categorizeDomain(normalized);
+
+  // Globally bad category match (adult, malware, weapons, etc.).
+  if (category.matchedCategory) {
+    await setCachedVerdict(deviceToken, normalized, 'block', TTL.block);
+    await incrementBlockCounter(childProfileId, category.matchedCategory);
+    return {
+      domain: normalized,
+      verdict: 'block',
+      category: category.matchedCategory,
+      reason: 'ai_categorized',
+      latency_ms: Date.now() - start,
+    };
+  }
+
+  // Per-child parent-blocked category.
+  const parentBlockedHit = category.categories.find((c) =>
+    blockedCategories.includes(c)
+  );
+  if (parentBlockedHit) {
+    await setCachedVerdict(deviceToken, normalized, 'block', TTL.block);
+    await incrementBlockCounter(childProfileId, parentBlockedHit);
+    return {
+      domain: normalized,
+      verdict: 'block',
+      category: parentBlockedHit,
+      reason: 'parent_category',
+      latency_ms: Date.now() - start,
+    };
+  }
+
+  // Step 7: default allow — short TTL so we re-check after intel updates.
   await setCachedVerdict(deviceToken, normalized, 'allow', TTL.uncategorized);
-  await logEvent(profile, normalized, 'allow', 'uncategorized', start);
   return {
     domain: normalized,
     verdict: 'allow',
@@ -151,30 +168,4 @@ export async function resolve(
     reason: 'default_allow',
     latency_ms: Date.now() - start,
   };
-}
-
-async function logEvent(
-  profile: any,
-  domain: string,
-  verdict: Verdict,
-  category: string | null,
-  start: number
-) {
-  try {
-    await db.query(
-      `INSERT INTO dns_events
-        (device_id, child_profile_id, domain, verdict, category, latency_ms)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [
-        profile.device_id,
-        profile.child_profile_id,
-        domain,
-        verdict,
-        category,
-        Date.now() - start,
-      ]
-    );
-  } catch (err) {
-    console.error('Failed to log DNS event:', err);
-  }
 }

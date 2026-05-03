@@ -1,5 +1,10 @@
 import { db } from './connection';
 
+/**
+ * Initial migration. Privacy-minimal schema:
+ *  - No age field on child profiles, just a tier.
+ *  - No URL/domain logging. block_counters table holds aggregated counts only.
+ */
 async function migrate() {
   console.log('Running migrations...');
 
@@ -16,8 +21,8 @@ async function migrate() {
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       family_id UUID NOT NULL REFERENCES families(id),
       name TEXT NOT NULL,
-      age INTEGER,
-      protection_level TEXT NOT NULL DEFAULT 'standard',
+      tier TEXT NOT NULL DEFAULT 'standard'
+        CHECK (tier IN ('strict', 'standard', 'light')),
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
@@ -45,17 +50,22 @@ async function migrate() {
     );
   `);
 
+  // Aggregated block counters. One row per child per day per category.
+  // No domains, no URLs, no per-event detail.
   await db.query(`
-    CREATE TABLE IF NOT EXISTS dns_events (
+    CREATE TABLE IF NOT EXISTS block_counters (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      device_id UUID REFERENCES devices(id),
-      child_profile_id UUID REFERENCES child_profiles(id),
-      domain TEXT NOT NULL,
-      verdict TEXT NOT NULL,
-      category TEXT,
-      latency_ms INTEGER,
-      resolved_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      child_profile_id UUID NOT NULL REFERENCES child_profiles(id) ON DELETE CASCADE,
+      day DATE NOT NULL,
+      category TEXT NOT NULL,
+      count INTEGER NOT NULL DEFAULT 0,
+      UNIQUE (child_profile_id, day, category)
     );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS idx_block_counters_child_day
+    ON block_counters (child_profile_id, day DESC);
   `);
 
   console.log('All tables created successfully.');
