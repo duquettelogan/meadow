@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
 import { db } from '../db/connection';
 import { getDailyBlockCount, getTotalsByCategory } from '../db/counters';
 import { authRouter } from './auth-routes';
@@ -8,22 +9,74 @@ import {
   requireParentForChild,
   requireDeviceAuth,
 } from '../auth/middleware';
+import {
+  validateBody,
+  errorHandler,
+  requestLogger,
+} from './middleware';
+import {
+  CreateChildBody,
+  UpdatePolicyBody,
+  RegisterDeviceBody,
+  ResolveBody,
+  AnalyzeBody,
+} from './validation';
+import { resolveLimiter, defaultLimiter } from './rate-limits';
 
 const app = express();
-app.use(cors());
-app.use(express.json());
-app.use('/dns-query', express.raw({ type: 'application/dns-message' }));
+
+// ---------- Security middleware ----------
+app.use(helmet({
+  // The DoH endpoint serves binary DNS messages, not HTML — relax CSP for it.
+  // Everything else gets the full helmet treatment.
+  contentSecurityPolicy: {
+    useDefaults: true,
+    directives: {
+      "default-src": ["'self'"],
+      "frame-ancestors": ["'none'"],
+    },
+  },
+  crossOriginResourcePolicy: { policy: 'same-site' },
+}));
+
+// CORS: only allow configured dashboard origins. Default to localhost dev.
+const allowedOrigins = (
+  process.env.ALLOWED_ORIGINS || 'http://localhost:5173,http://localhost:3001'
+).split(',').map(s => s.trim()).filter(Boolean);
+
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      // Allow requests with no origin (curl, mobile apps, server-to-server).
+      if (!origin) return cb(null, true);
+      if (allowedOrigins.includes(origin)) return cb(null, true);
+      cb(new Error('CORS: origin not allowed'));
+    },
+    credentials: true,
+  })
+);
+
+// Body limits — JSON capped at 100kb. DNS messages capped at 8kb.
+app.use(express.json({ limit: '100kb' }));
+app.use('/dns-query', express.raw({
+  type: 'application/dns-message',
+  limit: '8kb',
+}));
+
+app.use(requestLogger);
 
 // ---------- Public ----------
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'meadow-api' });
 });
 
-// Auth routes (signup, login, /me, device keys). Each route inside enforces
-// its own auth requirements.
+// Auth router has its own rate limits on signup/login.
 app.use('/api/v1/auth', authRouter);
 
-// ---------- Family (parent-authed, scoped to own family) ----------
+// Default rate limit for everything else under /api/v1.
+app.use('/api/v1', defaultLimiter);
+
+// ---------- Family ----------
 app.get('/api/v1/families/me', requireParentAuth, async (req, res) => {
   try {
     const result = await db.query(
@@ -41,36 +94,37 @@ app.get('/api/v1/families/me', requireParentAuth, async (req, res) => {
   }
 });
 
-// ---------- Children (no age, just tier) ----------
-app.post('/api/v1/children', requireParentAuth, async (req, res) => {
-  const { name, tier } = req.body;
-  if (!name) {
-    res.status(400).json({ error: 'name is required' });
-    return;
+// ---------- Children ----------
+app.post(
+  '/api/v1/children',
+  requireParentAuth,
+  validateBody(CreateChildBody),
+  async (req, res) => {
+    const { name, tier } = req.body as { name: string; tier?: string };
+    try {
+      const child = await db.query(
+        `INSERT INTO child_profiles (family_id, name, tier)
+         VALUES ($1, $2, COALESCE($3, 'standard'))
+         RETURNING id, family_id, name, tier, created_at`,
+        [req.parent!.family_id, name, tier ?? null]
+      );
+      await db.query(
+        'INSERT INTO filter_policies (child_profile_id) VALUES ($1)',
+        [child.rows[0].id]
+      );
+      res.status(201).json(child.rows[0]);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'internal server error' });
+    }
   }
-  try {
-    const child = await db.query(
-      `INSERT INTO child_profiles (family_id, name, tier)
-       VALUES ($1, $2, COALESCE($3, 'standard'))
-       RETURNING id, family_id, name, tier, created_at`,
-      [req.parent!.family_id, name, tier ?? null]
-    );
-    await db.query(
-      'INSERT INTO filter_policies (child_profile_id) VALUES ($1)',
-      [child.rows[0].id]
-    );
-    res.status(201).json(child.rows[0]);
-  } catch (err: any) {
-    console.error(err);
-    res.status(500).json({ error: 'internal server error' });
-  }
-});
+);
 
 app.get(
   '/api/v1/children/:childId',
   requireParentForChild('childId'),
   async (req, res) => {
-    const { childId } = req.params;
+    const childId = req.params.childId as string;
     try {
       const result = await db.query(
         `SELECT c.id, c.family_id, c.name, c.tier,
@@ -96,15 +150,22 @@ app.get(
 app.patch(
   '/api/v1/children/:childId/policy',
   requireParentForChild('childId'),
+  validateBody(UpdatePolicyBody),
   async (req, res) => {
-    const { childId } = req.params;
+    const childId = req.params.childId as string;
     const {
       blocked_categories,
       allowed_domains,
       blocked_domains,
       safe_search_enforce,
       youtube_restrict,
-    } = req.body;
+    } = req.body as {
+      blocked_categories?: string[];
+      allowed_domains?: string[];
+      blocked_domains?: string[];
+      safe_search_enforce?: boolean;
+      youtube_restrict?: boolean;
+    };
     try {
       await db.query(
         `UPDATE filter_policies SET
@@ -131,49 +192,51 @@ app.patch(
   }
 );
 
-// ---------- Devices (parent-authed registration) ----------
-app.post('/api/v1/devices/register', requireParentAuth, async (req, res) => {
-  const { child_profile_id, platform, device_token } = req.body;
-  if (!platform || !device_token) {
-    res
-      .status(400)
-      .json({ error: 'platform and device_token are required' });
-    return;
-  }
+// ---------- Devices ----------
+app.post(
+  '/api/v1/devices/register',
+  requireParentAuth,
+  validateBody(RegisterDeviceBody),
+  async (req, res) => {
+    const { child_profile_id, platform, device_token } = req.body as {
+      child_profile_id?: string;
+      platform: string;
+      device_token: string;
+    };
 
-  try {
-    // Validate child belongs to this family if provided.
-    if (child_profile_id) {
-      const owns = await db.query(
-        'SELECT 1 FROM child_profiles WHERE id = $1 AND family_id = $2',
-        [child_profile_id, req.parent!.family_id]
-      );
-      if (owns.rows.length === 0) {
-        res.status(403).json({ error: 'child not in your family' });
-        return;
+    try {
+      if (child_profile_id) {
+        const owns = await db.query(
+          'SELECT 1 FROM child_profiles WHERE id = $1 AND family_id = $2',
+          [child_profile_id, req.parent!.family_id]
+        );
+        if (owns.rows.length === 0) {
+          res.status(403).json({ error: 'child not in your family' });
+          return;
+        }
       }
-    }
 
-    const result = await db.query(
-      `INSERT INTO devices (family_id, child_profile_id, platform, device_token, last_seen)
-       VALUES ($1, $2, $3, $4, NOW())
-       ON CONFLICT (device_token)
-       DO UPDATE SET last_seen = NOW(), child_profile_id = $2
-       RETURNING id, family_id, child_profile_id, platform, last_seen`,
-      [req.parent!.family_id, child_profile_id ?? null, platform, device_token]
-    );
-    res.status(201).json(result.rows[0]);
-  } catch (err: any) {
-    console.error(err);
-    res.status(500).json({ error: 'internal server error' });
+      const result = await db.query(
+        `INSERT INTO devices (family_id, child_profile_id, platform, device_token, last_seen)
+         VALUES ($1, $2, $3, $4, NOW())
+         ON CONFLICT (device_token)
+         DO UPDATE SET last_seen = NOW(), child_profile_id = $2
+         RETURNING id, family_id, child_profile_id, platform, last_seen`,
+        [req.parent!.family_id, child_profile_id ?? null, platform, device_token]
+      );
+      res.status(201).json(result.rows[0]);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'internal server error' });
+    }
   }
-});
+);
 
 app.get(
   '/api/v1/children/:childId/devices',
   requireParentForChild('childId'),
   async (req, res) => {
-    const { childId } = req.params;
+    const childId = req.params.childId as string;
     try {
       const result = await db.query(
         'SELECT id, platform, device_token, last_seen FROM devices WHERE child_profile_id = $1',
@@ -187,7 +250,7 @@ app.get(
   }
 );
 
-// ---------- Counters (parent-authed, aggregated only) ----------
+// ---------- Counters ----------
 app.get(
   '/api/v1/children/:childId/blocks/today',
   requireParentForChild('childId'),
@@ -222,68 +285,72 @@ app.get(
   }
 );
 
-// ---------- Resolver / DoH (device-authed) ----------
-app.post('/api/v1/resolve', requireDeviceAuth, async (req, res) => {
-  const { domain } = req.body;
-  if (!domain) {
-    res.status(400).json({ error: 'domain is required' });
-    return;
-  }
-  try {
-    const { resolve } = await import('../resolver/index');
-    // Use the authenticated device's stored device_token for policy lookup.
-    const deviceTokenLookup = await db.query(
-      'SELECT device_token FROM devices WHERE id = $1',
-      [req.device!.device_id]
-    );
-    const deviceToken = deviceTokenLookup.rows[0]?.device_token;
-    if (!deviceToken) {
-      res.status(401).json({ error: 'device not found' });
-      return;
+// ---------- Resolver / DoH ----------
+// Higher rate limit on resolve — DNS lookups are frequent.
+app.post(
+  '/api/v1/resolve',
+  resolveLimiter,
+  requireDeviceAuth,
+  validateBody(ResolveBody),
+  async (req, res) => {
+    const { domain } = req.body as { domain: string };
+    try {
+      const { resolve } = await import('../resolver/index');
+      const deviceTokenLookup = await db.query(
+        'SELECT device_token FROM devices WHERE id = $1',
+        [req.device!.device_id]
+      );
+      const deviceToken = deviceTokenLookup.rows[0]?.device_token;
+      if (!deviceToken) {
+        res.status(401).json({ error: 'device not found' });
+        return;
+      }
+      const result = await resolve(domain, deviceToken);
+      res.json(result);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'internal server error' });
     }
-    const result = await resolve(domain, deviceToken);
-    res.json(result);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'internal server error' });
   }
-});
+);
 
-app.post('/api/v1/analyze', requireDeviceAuth, async (req, res) => {
-  const { url } = req.body;
-  if (!url) {
-    res.status(400).json({ error: 'url is required' });
-    return;
-  }
-  try {
-    const cacheKey = 'content:' + url;
-    const { createClient } = await import('redis');
-    const redis = createClient({ url: process.env.REDIS_URL });
-    await redis.connect();
-    const cached = await redis.get(cacheKey);
-    if (cached) {
+app.post(
+  '/api/v1/analyze',
+  resolveLimiter,
+  requireDeviceAuth,
+  validateBody(AnalyzeBody),
+  async (req, res) => {
+    const { url } = req.body as { url: string };
+    try {
+      const cacheKey = 'content:' + url;
+      const { createClient } = await import('redis');
+      const redis = createClient({ url: process.env.REDIS_URL });
+      await redis.connect();
+      const cached = await redis.get(cacheKey);
+      if (cached) {
+        await redis.disconnect();
+        res.json(JSON.parse(cached));
+        return;
+      }
+      const { fetchPageText, analyzeContent } = await import(
+        '../resolver/content'
+      );
+      const text = await fetchPageText(url);
+      const verdict = await analyzeContent(url, text);
+      await redis.set(cacheKey, JSON.stringify(verdict), { EX: 3600 });
       await redis.disconnect();
-      res.json(JSON.parse(cached));
-      return;
+      res.json(verdict);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'internal server error' });
     }
-    const { fetchPageText, analyzeContent } = await import(
-      '../resolver/content'
-    );
-    const text = await fetchPageText(url);
-    const verdict = await analyzeContent(url, text);
-    await redis.set(cacheKey, JSON.stringify(verdict), { EX: 3600 });
-    await redis.disconnect();
-    res.json(verdict);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'internal server error' });
   }
-});
+);
 
-// DoH stays public — DNS-over-HTTPS protocol can't easily carry custom auth
-// headers from arbitrary clients. Network position protects this endpoint
-// (only the local network reaches it, by firewall rule on the Pi).
-app.post('/dns-query', async (req, res) => {
+// DoH stays public — DNS-over-HTTPS clients can't carry custom auth headers.
+// Network-layer protection (firewall to local network only) is the right
+// defense here, not application-layer auth.
+app.post('/dns-query', resolveLimiter, async (req, res) => {
   try {
     const { handleDoH } = await import('../resolver/doh');
     const result = await handleDoH(req.body);
@@ -295,10 +362,10 @@ app.post('/dns-query', async (req, res) => {
   }
 });
 
-app.get('/dns-query', async (req, res) => {
+app.get('/dns-query', resolveLimiter, async (req, res) => {
   try {
     const dnsParam = req.query['dns'] as string;
-    if (!dnsParam) {
+    if (!dnsParam || dnsParam.length > 4096) {
       res.status(400).end();
       return;
     }
@@ -312,5 +379,13 @@ app.get('/dns-query', async (req, res) => {
     res.status(500).end();
   }
 });
+
+// 404 for anything unmatched.
+app.use((req, res) => {
+  res.status(404).json({ error: 'not found' });
+});
+
+// Final error handler — must be last.
+app.use(errorHandler);
 
 export { app };
