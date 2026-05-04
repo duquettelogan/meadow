@@ -49,3 +49,19 @@ export const defaultLimiter = makeLimiter({
   limit: 60,
   message: { error: 'rate limit exceeded' },
 });
+
+// Pairing claim is strict — 6-digit code = 1M combinations, brute-force
+// is feasible without rate limits. 10 attempts per 15 min per IP.
+export const pairingClaimLimiter = makeLimiter({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  message: { error: 'too many pairing attempts, try again later' },
+});
+
+// Pairing start and poll are device-side — these are forgiving, just
+// keeping a sanity ceiling so a misbehaving device can't DoS the server.
+export const pairingDeviceLimiter = makeLimiter({
+  windowMs: 60 * 1000,
+  limit: 30,
+  message: { error: 'rate limit exceeded' },
+});

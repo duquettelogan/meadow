@@ -4,7 +4,6 @@ import helmet from 'helmet';
 import { db } from '../db/connection';
 import { getDailyBlockCount, getTotalsByCategory } from '../db/counters';
 import { authRouter } from './auth-routes';
-import { pairingRouter } from './pairing-routes';
 import {
   requireParentAuth,
   requireParentForChild,
@@ -48,14 +47,12 @@ const allowedOrigins = (
 app.use(
   cors({
     origin: (origin, cb) => {
+      // Allow requests with no origin (curl, mobile apps, server-to-server).
       if (!origin) return cb(null, true);
       if (allowedOrigins.includes(origin)) return cb(null, true);
-      try {
-        const host = new URL(origin).hostname;
-        if (host.endsWith('.base44.com') || host.endsWith('.base44.app')) {
-          return cb(null, true);
-        }
-      } catch {}
+      // Disallowed origins: don't error, just don't set the CORS header.
+      // The browser will block the response client-side. Throwing an error
+      // here breaks non-browser clients (curl, health checks, etc.) entirely.
       cb(null, false);
     },
     credentials: true,
@@ -78,9 +75,6 @@ app.get('/health', (req, res) => {
 
 // Auth router has its own rate limits on signup/login.
 app.use('/api/v1/auth', authRouter);
-
-// Pairing routes have their own rate limits inside the router.
-app.use('/api/v1/pairing', pairingRouter);
 
 // Default rate limit for everything else under /api/v1.
 app.use('/api/v1', defaultLimiter);

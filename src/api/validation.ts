@@ -111,6 +111,42 @@ export const AnalyzeBody = z
   })
   .strict();
 
+// ---------- Pairing ----------
+const hardwareId = z
+  .string()
+  .min(8)
+  .max(128)
+  .regex(/^[a-zA-Z0-9_-]+$/, 'invalid hardware_id');
+
+// Code format: XXX-XXX or XXXXXX (digits only). We accept both for forgiving
+// parent input — server normalizes by stripping non-digits.
+const pairingCode = z
+  .string()
+  .min(6)
+  .max(7)
+  .regex(/^[\d]{3}-?[\d]{3}$/, 'invalid pairing code (expected XXX-XXX)');
+
+export const PairingStartBody = z
+  .object({
+    hardware_id: hardwareId,
+    platform,
+  })
+  .strict();
+
+export const PairingClaimBody = z
+  .object({
+    code: pairingCode,
+    child_profile_id: uuid,
+  })
+  .strict();
+
+export const PairingPollBody = z
+  .object({
+    code: pairingCode,
+    hardware_id: hardwareId,
+  })
+  .strict();
+
 // ---------- Helpers ----------
 export type ZodIssueResponse = { error: string; details?: unknown };
 
