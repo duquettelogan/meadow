@@ -2,3 +2,4 @@ node_modules/
 dist/
 .env.sim-device.json
 *.save
+.env
