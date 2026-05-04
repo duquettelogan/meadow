@@ -2,6 +2,7 @@ import { testConnection } from './db/connection';
 import { connectCache } from './cache/index';
 import { loadBlocklist } from './cache/blocklist';
 import { startScheduler, stopScheduler } from './intel/updater';
+import { startDnsServer, stopDnsServer } from './dns/udp-server';
 import { app } from './api/server';
 
 const PORT = process.env.PORT || 3000;
@@ -14,15 +15,29 @@ async function main() {
   await loadBlocklist();
   startScheduler();
 
+  // Start the UDP DNS server so devices on the LAN can use Meadow as
+  // their DNS server. If the port can't be bound (e.g. running as
+  // unprivileged user without CAP_NET_BIND_SERVICE on port 53), log
+  // and continue — the API still works.
+  try {
+    await startDnsServer();
+  } catch (err: any) {
+    console.error('[dns] failed to start UDP server:', err.message);
+    if (err.code === 'EACCES') {
+      console.error('[dns] hint: port 53 requires root or CAP_NET_BIND_SERVICE.');
+      console.error('[dns]       for local dev, set DNS_PORT=5353 in .env');
+    }
+    console.error('[dns] continuing without UDP DNS — API still functional.');
+  }
+
   const server = app.listen(PORT, () => {
     console.log(`Meadow API running on http://localhost:${PORT}`);
   });
 
-  // Graceful shutdown — stop the scheduler so we don't leak the timer
-  // when the process restarts.
-  const shutdown = (signal: string) => {
+  const shutdown = async (signal: string) => {
     console.log(`\n[${signal}] shutting down...`);
     stopScheduler();
+    await stopDnsServer().catch(() => {});
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(1), 5000).unref();
   };

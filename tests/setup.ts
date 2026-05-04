@@ -28,6 +28,9 @@ process.env.DISABLE_SCHEDULER = '1';
 // otherwise (signup limiter is 5/hour, integration tests need way more).
 process.env.DISABLE_RATE_LIMITS = '1';
 
+// Don't bind UDP/53 in tests.
+process.env.DNS_PORT = '0';
+
 // Close the connection pool after all tests so the process can exit.
 afterAll(async () => {
   try {
