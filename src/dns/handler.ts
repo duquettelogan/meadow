@@ -2,6 +2,7 @@ import * as dnsPacket from 'dns-packet';
 import { getBlockCategory } from '../cache/blocklist';
 import { getCachedVerdict, setCachedVerdict } from '../cache/index';
 import { forwardUpstream } from './upstream';
+import { incrementBlockCounter } from '../db/counters';
 
 /**
  * Unified DNS query handler.
@@ -15,9 +16,20 @@ import { forwardUpstream } from './upstream';
  *   2. Categorized blocklist check (malware, phishing, doh_bypass, adult)
  *   3. Forward to upstream if allowed
  *
+ * If `options.childProfileId` is supplied, blocked queries also fire a
+ * fire-and-forget block_counters increment. The UDP server passes the
+ * box's resolved child_profile_id; DoH currently doesn't (TODO).
+ *
  * Returns a binary DNS response packet ready to send back to the client.
  */
-export async function handleDnsQuery(body: Buffer): Promise<Buffer> {
+export interface HandleDnsOptions {
+  childProfileId?: string | null;
+}
+
+export async function handleDnsQuery(
+  body: Buffer,
+  options: HandleDnsOptions = {},
+): Promise<Buffer> {
   let query: dnsPacket.Packet;
   try {
     query = dnsPacket.decode(body);
@@ -44,9 +56,19 @@ export async function handleDnsQuery(body: Buffer): Promise<Buffer> {
   }
 
   const domain = String(question.name).toLowerCase();
-  const blocked = await shouldBlock(domain);
+  const verdict = await classifyDomain(domain);
 
-  if (blocked) {
+  if (verdict.blocked) {
+    // Fire-and-forget counter increment. Never blocks the DNS response.
+    if (options.childProfileId) {
+      incrementBlockCounter(
+        options.childProfileId,
+        verdict.category ?? 'unknown',
+      ).catch((err) => {
+        console.error('[dns] block counter increment failed:', err);
+      });
+    }
+
     return dnsPacket.encode({
       type: 'response',
       id: query.id,
@@ -81,18 +103,40 @@ export async function handleDnsQuery(body: Buffer): Promise<Buffer> {
   }
 }
 
-async function shouldBlock(domain: string): Promise<boolean> {
+interface Verdict {
+  blocked: boolean;
+  category: string | null;
+}
+
+/**
+ * Decide whether to block + which category. Cache stores either:
+ *   - "allow"
+ *   - "block:<category>"   (new format, includes category for counter)
+ *   - "block"              (legacy format from earlier deploys, treated as 'unknown')
+ *
+ * On cache miss, look up the category from the blocklists and write
+ * back to cache with the new format.
+ */
+async function classifyDomain(domain: string): Promise<Verdict> {
   const cached = await getCachedVerdict('global', domain);
-  if (cached !== null && cached !== undefined) {
-    return cached === 'block';
+
+  if (cached === 'allow') {
+    return { blocked: false, category: null };
   }
 
+  if (typeof cached === 'string' && cached.startsWith('block')) {
+    const idx = cached.indexOf(':');
+    const category = idx >= 0 ? cached.slice(idx + 1) : 'unknown';
+    return { blocked: true, category };
+  }
+
+  // Cache miss — hit the blocklists.
   const category = await getBlockCategory(domain);
   if (category) {
-    await setCachedVerdict('global', domain, 'block', 21600);
-    return true;
+    await setCachedVerdict('global', domain, `block:${category}`, 21600);
+    return { blocked: true, category };
   }
 
   await setCachedVerdict('global', domain, 'allow', 86400);
-  return false;
+  return { blocked: false, category: null };
 }
