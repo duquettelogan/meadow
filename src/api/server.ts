@@ -26,10 +26,12 @@ import { resolveLimiter, defaultLimiter } from './rate-limits';
 
 const app = express();
 
+// Trust the first proxy hop (cloudflared / future load balancer) so
+// express-rate-limit can read the real client IP from X-Forwarded-For.
+app.set('trust proxy', 1);
+
 // ---------- Security middleware ----------
 app.use(helmet({
-  // The DoH endpoint serves binary DNS messages, not HTML — relax CSP for it.
-  // Everything else gets the full helmet treatment.
   contentSecurityPolicy: {
     useDefaults: true,
     directives: {
@@ -40,7 +42,9 @@ app.use(helmet({
   crossOriginResourcePolicy: { policy: 'same-site' },
 }));
 
-// CORS: only allow configured dashboard origins. Default to localhost dev.
+// CORS: allow configured origins from env, plus any *.base44.com / *.base44.app
+// (so the dashboard works in dev). Tighten for production by removing the
+// regex fallback.
 const allowedOrigins = (
   process.env.ALLOWED_ORIGINS || 'http://localhost:5173,http://localhost:3001'
 ).split(',').map(s => s.trim()).filter(Boolean);
@@ -128,6 +132,29 @@ app.post(
     }
   }
 );
+
+// List all children in the parent's family. Returns each child with
+// today's block count rolled in to avoid N+1 calls from the dashboard.
+app.get('/api/v1/children', requireParentAuth, async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT c.id, c.family_id, c.name, c.tier, c.created_at,
+              COALESCE(SUM(b.count), 0)::int AS blocks_today
+       FROM child_profiles c
+       LEFT JOIN block_counters b
+         ON b.child_profile_id = c.id
+        AND b.day = CURRENT_DATE
+       WHERE c.family_id = $1
+       GROUP BY c.id
+       ORDER BY c.created_at ASC`,
+      [req.parent!.family_id]
+    );
+    res.json({ children: result.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'internal server error' });
+  }
+});
 
 app.get(
   '/api/v1/children/:childId',
@@ -241,6 +268,27 @@ app.post(
   }
 );
 
+// List all devices in the parent's family. Joined with child name so the
+// dashboard can render "Living room TV — assigned to Emma" without a
+// second call. Never returns device_token (that's the device's secret).
+app.get('/api/v1/devices', requireParentAuth, async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT d.id, d.platform, d.last_seen,
+              d.child_profile_id, c.name AS child_name
+       FROM devices d
+       LEFT JOIN child_profiles c ON c.id = d.child_profile_id
+       WHERE d.family_id = $1
+       ORDER BY d.last_seen ASC`,
+      [req.parent!.family_id]
+    );
+    res.json({ devices: result.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'internal server error' });
+  }
+});
+
 app.get(
   '/api/v1/children/:childId/devices',
   requireParentForChild('childId'),
@@ -295,7 +343,6 @@ app.get(
 );
 
 // ---------- Resolver / DoH ----------
-// Higher rate limit on resolve — DNS lookups are frequent.
 app.post(
   '/api/v1/resolve',
   resolveLimiter,
@@ -357,8 +404,6 @@ app.post(
 );
 
 // DoH stays public — DNS-over-HTTPS clients can't carry custom auth headers.
-// Network-layer protection (firewall to local network only) is the right
-// defense here, not application-layer auth.
 app.post('/dns-query', resolveLimiter, async (req, res) => {
   try {
     const { handleDoH } = await import('../resolver/doh');

@@ -1,0 +1,50 @@
+[Unit]
+Description=Meadow Box Bootstrap (pairing)
+Documentation=https://github.com/duquettelogan/meadow
+After=network-online.target
+Wants=network-online.target
+# meadow.service should declare:  Requires=meadow-bootstrap.service
+# and:                            After=meadow-bootstrap.service
+# so the DNS server only starts once a device_id exists.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=meadow
+Group=meadow
+
+# Working dir + state.
+WorkingDirectory=/opt/meadow
+Environment=NODE_ENV=production
+Environment=STATE_FILE=/etc/meadow/state.json
+EnvironmentFile=-/etc/meadow/bootstrap.env
+
+# Run via ts-node in dev; for prod, point this at the compiled JS instead.
+ExecStart=/usr/bin/env npx ts-node /opt/meadow/src/box/bootstrap.ts
+
+# /etc/meadow must exist and be writable by the meadow user.
+# install.sh creates it with mode 0700 owner meadow:meadow.
+ReadWritePaths=/etc/meadow
+
+# Hardening.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+# If pairing fails (code expired, network out), let systemd retry a few
+# times before giving up.
+Restart=on-failure
+RestartSec=15s
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+[Install]
+WantedBy=multi-user.target

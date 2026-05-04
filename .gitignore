@@ -1,5 +1,7 @@
 node_modules/
 dist/
-.env.sim-device.json
+.env*
+!.env.example
+!.env.test.example
+.sim-device.json
 *.save
-.env
