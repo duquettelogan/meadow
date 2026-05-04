@@ -11,7 +11,9 @@ async function main() {
   process.exit(0);
 }
 
-main().catch((err) => {
-  console.error('refresh failed:', err);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error('refresh failed:', err);
+    process.exit(1);
+  });
+}

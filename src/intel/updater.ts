@@ -76,7 +76,7 @@ async function fetchAndStore(src: IntelSource): Promise<void> {
   console.log(`[intel] ${src.name} → ${src.category}: ${count} domains`);
 }
 
-function parseFeed(text: string, format: 'hosts' | 'domains'): string[] {
+export function parseFeed(text: string, format: 'hosts' | 'domains'): string[] {
   const out: string[] = [];
   for (const raw of text.split('\n')) {
     const line = raw.trim();
@@ -115,6 +115,10 @@ function isValidDomain(d: string): boolean {
  */
 export function startScheduler(): void {
   if (timer) return;
+  if (process.env.DISABLE_SCHEDULER === '1') {
+    console.log('[intel] scheduler disabled (DISABLE_SCHEDULER=1)');
+    return;
+  }
 
   // Run once at startup, but don't block boot.
   runUpdate().catch((err) => {

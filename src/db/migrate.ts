@@ -72,7 +72,10 @@ async function migrate() {
   await db.end();
 }
 
-migrate().catch((err) => {
-  console.error('Migration failed:', err);
-  process.exit(1);
-});
+// Only run when invoked directly (not when imported).
+if (require.main === module) {
+  migrate().catch((err) => {
+    console.error('Migration failed:', err);
+    process.exit(1);
+  });
+}

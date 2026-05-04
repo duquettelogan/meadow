@@ -1,4 +1,4 @@
-import rateLimit from 'express-rate-limit';
+import rateLimit, { Options } from 'express-rate-limit';
 
 /**
  * Rate limiters.
@@ -10,38 +10,42 @@ import rateLimit from 'express-rate-limit';
  *
  * Note: these are IP-based. Behind a load balancer you need to set
  * app.set('trust proxy', 1) so req.ip reflects the real client.
+ *
+ * Set DISABLE_RATE_LIMITS=1 to skip enforcement (tests, local debugging).
  */
 
-export const loginLimiter = rateLimit({
+const DISABLED = process.env.DISABLE_RATE_LIMITS === '1';
+
+function makeLimiter(opts: Partial<Options>) {
+  return rateLimit({
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    skip: () => DISABLED,
+    ...opts,
+  });
+}
+
+export const loginLimiter = makeLimiter({
   windowMs: 15 * 60 * 1000,
   limit: 5,
-  standardHeaders: 'draft-7',
-  legacyHeaders: false,
   message: { error: 'too many login attempts, try again later' },
-  // Don't count successful logins.
   skipSuccessfulRequests: true,
 });
 
-export const signupLimiter = rateLimit({
+export const signupLimiter = makeLimiter({
   windowMs: 60 * 60 * 1000,
   limit: 5,
-  standardHeaders: 'draft-7',
-  legacyHeaders: false,
   message: { error: 'too many signup attempts, try again later' },
 });
 
-export const resolveLimiter = rateLimit({
+export const resolveLimiter = makeLimiter({
   windowMs: 60 * 1000,
   limit: 600,
-  standardHeaders: 'draft-7',
-  legacyHeaders: false,
   message: { error: 'rate limit exceeded' },
 });
 
-export const defaultLimiter = rateLimit({
+export const defaultLimiter = makeLimiter({
   windowMs: 60 * 1000,
   limit: 60,
-  standardHeaders: 'draft-7',
-  legacyHeaders: false,
   message: { error: 'rate limit exceeded' },
 });

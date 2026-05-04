@@ -64,7 +64,9 @@ async function migrate() {
   await db.end();
 }
 
-migrate().catch((err) => {
-  console.error('Migration 002 failed:', err);
-  process.exit(1);
-});
+if (require.main === module) {
+  migrate().catch((err) => {
+    console.error('Migration 002 failed:', err);
+    process.exit(1);
+  });
+}
