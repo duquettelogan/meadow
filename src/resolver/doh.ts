@@ -1,15 +1,14 @@
-import { isBlocked } from '../cache/blocklist';
+import { getBlockCategory } from '../cache/blocklist';
 import { getCachedVerdict, setCachedVerdict } from '../cache/index';
 import * as dnsPacket from 'dns-packet';
 
 /**
  * DNS-over-HTTPS handler.
  *
- * Note: this path does NOT have a device_token associated with it (clients
- * hitting /dns-query directly are unauthenticated). We only do global
- * blocklist enforcement here. Per-child policy lives in /api/v1/resolve.
- *
- * No URLs or domains are persisted from this path.
+ * Unauthenticated (clients can't easily inject custom auth headers into
+ * DoH protocol). Network-layer protection limits this endpoint to the
+ * local network. Only global blocklist enforcement happens here — per-child
+ * policy lives in /api/v1/resolve.
  */
 export async function handleDoH(body: Buffer): Promise<Buffer> {
   try {
@@ -57,8 +56,8 @@ async function shouldBlock(domain: string): Promise<boolean> {
   const cached = await getCachedVerdict('global', domain);
   if (cached) return cached === 'block';
 
-  const blocked = await isBlocked(domain);
-  if (blocked) {
+  const category = await getBlockCategory(domain);
+  if (category) {
     await setCachedVerdict('global', domain, 'block', 21600);
     return true;
   }

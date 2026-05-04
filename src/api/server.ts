@@ -50,7 +50,10 @@ app.use(
       // Allow requests with no origin (curl, mobile apps, server-to-server).
       if (!origin) return cb(null, true);
       if (allowedOrigins.includes(origin)) return cb(null, true);
-      cb(new Error('CORS: origin not allowed'));
+      // Disallowed origins: don't error, just don't set the CORS header.
+      // The browser will block the response client-side. Throwing an error
+      // here breaks non-browser clients (curl, health checks, etc.) entirely.
+      cb(null, false);
     },
     credentials: true,
   })
