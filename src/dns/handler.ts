@@ -3,6 +3,7 @@ import { getBlockCategory } from '../cache/blocklist';
 import { getCachedVerdict, setCachedVerdict } from '../cache/index';
 import { forwardUpstream } from './upstream';
 import { incrementBlockCounter } from '../db/counters';
+import { isCrisisDomain } from '../intel/crisis-floor';
 
 /**
  * Unified DNS query handler.
@@ -11,7 +12,8 @@ import { incrementBlockCounter } from '../db/counters';
  *   - UDP server on port 53 (devices on the LAN)
  *   - DoH endpoint on port 3000 (DoH-capable clients)
  *
- * For each query:
+ * Pipeline:
+ *   0. Crisis floor (hard allow, no log, no counter, no cache)
  *   1. Cache check (Redis, keyed by domain)
  *   2. Categorized blocklist check (malware, phishing, doh_bypass, adult)
  *   3. Forward to upstream if allowed
@@ -55,7 +57,34 @@ export async function handleDnsQuery(
     });
   }
 
-  const domain = String(question.name).toLowerCase();
+  const domain = String(question.name).toLowerCase().replace(/\.$/, '');
+
+  // ---------------------------------------------------------------
+  // Crisis floor — checked FIRST, ahead of cache, blocklists, and
+  // counters. Any match here:
+  //   - is forwarded upstream as a normal allow
+  //   - leaves NO record in our cache (nothing for an admin to grep)
+  //   - never increments block_counters
+  //   - never produces a log line that names the domain
+  // This is a deliberate privacy commitment, not a perf optimization.
+  // Do not "tidy this up" by folding it into classifyDomain().
+  // ---------------------------------------------------------------
+  if (isCrisisDomain(domain)) {
+    try {
+      return await forwardUpstream(body);
+    } catch {
+      // Generic failure path — explicitly do NOT log the err object
+      // because Node DNS errors often embed the hostname.
+      return dnsPacket.encode({
+        type: 'response',
+        id: query.id,
+        flags: dnsPacket.RECURSION_DESIRED | 2,
+        questions: query.questions,
+        answers: [],
+      });
+    }
+  }
+
   const verdict = await classifyDomain(domain);
 
   if (verdict.blocked) {
