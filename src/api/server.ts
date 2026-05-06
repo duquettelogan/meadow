@@ -9,6 +9,7 @@ import {
   requireParentAuth,
   requireParentForChild,
   requireDeviceAuth,
+  requireVerifiedParent,
 } from '../auth/middleware';
 import {
   validateBody,
@@ -110,9 +111,14 @@ app.get('/api/v1/families/me', requireParentAuth, async (req, res) => {
 });
 
 // ---------- Children ----------
+// Email-verification gate: creating new child profiles is one of the two
+// touchpoints that materially expand the account (the other is pairing
+// claim). Unverified parents get a 403 — the dashboard should surface
+// "verify your email first" UX and offer the /resend-verification button.
 app.post(
   '/api/v1/children',
   requireParentAuth,
+  requireVerifiedParent,
   validateBody(CreateChildBody),
   async (req, res) => {
     const { name, tier } = req.body as { name: string; tier?: string };

@@ -107,6 +107,50 @@ export function requireParentForChild(paramName = 'childId') {
 }
 
 /**
+ * Requires that the authenticated parent has verified their email.
+ * Returns 403 {"error":"email_not_verified"} otherwise.
+ *
+ * Soft gate — only applied to endpoints that materially expand the
+ * account's footprint (creating child profiles, claiming a hardware
+ * box). Login, password reset, /me, /resend-verification stay open
+ * so an unverified parent can still recover and complete verification.
+ *
+ * Always run AFTER requireParentAuth — relies on req.parent being set.
+ * Kept as a separate middleware (rather than folded into requireParentAuth)
+ * so we can opt routes in/out at the route definition site, not via a
+ * flag that's easy to miss in review.
+ */
+export async function requireVerifiedParent(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  if (!req.parent) {
+    // Defense in depth — should never happen since requireParentAuth
+    // runs first, but better to 401 than to leak data via a 500.
+    res.status(401).json({ error: 'missing authorization' });
+    return;
+  }
+  try {
+    const result = await db.query(
+      'SELECT email_verified_at FROM parents WHERE id = $1',
+      [req.parent.parent_id],
+    );
+    if (
+      result.rows.length === 0 ||
+      !result.rows[0].email_verified_at
+    ) {
+      res.status(403).json({ error: 'email_not_verified' });
+      return;
+    }
+    next();
+  } catch (err) {
+    console.error('verified-parent check failed:', err);
+    res.status(500).json({ error: 'internal server error' });
+  }
+}
+
+/**
  * Requires a valid device API key. Attaches req.device.
  *
  * Lookup is by key prefix (indexed), then constant-time HMAC compare.

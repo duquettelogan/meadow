@@ -58,3 +58,7 @@ Postgres and Redis must be running locally for integration tests.
   revokes old sessions); change-password authenticated; logout
   (single-session) — no email enumeration on forgot
 - /dns-query Bearer auth gate (Phase 4.1)
+- Email-verification soft gate: 403 email_not_verified on POST /children
+  and POST /pairing/claim for unverified parents; login / /me /
+  resend-verification stay open; /resend-verification idempotent for
+  already-verified parents

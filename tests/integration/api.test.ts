@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import { app } from '../../src/api/server';
 import { db } from '../../src/db/connection';
+import { verifyEmailFor } from '../helpers';
 
 /**
  * End-to-end API tests. Hits the real Express app with supertest, against
@@ -117,12 +118,16 @@ describe('auth gates', () => {
 
   it('parent cannot access another family', async () => {
     // Create two parents in two families.
+    const emailA = uniqueEmail();
+    const emailB = uniqueEmail();
     const a = await request(app)
       .post('/api/v1/auth/signup')
-      .send({ email: uniqueEmail(), password: 'parentapw1234' });
+      .send({ email: emailA, password: 'parentapw1234' });
     const b = await request(app)
       .post('/api/v1/auth/signup')
-      .send({ email: uniqueEmail(), password: 'parentbpw1234' });
+      .send({ email: emailB, password: 'parentbpw1234' });
+    await verifyEmailFor(emailA);
+    await verifyEmailFor(emailB);
 
     // Parent A creates a child.
     const child = await request(app)
@@ -141,9 +146,11 @@ describe('auth gates', () => {
 
 describe('children + policy', () => {
   it('creates a child and updates its policy', async () => {
+    const email = uniqueEmail();
     const signup = await request(app)
       .post('/api/v1/auth/signup')
-      .send({ email: uniqueEmail(), password: 'parentpw12345' });
+      .send({ email, password: 'parentpw12345' });
+    await verifyEmailFor(email);
     const token = signup.body.token;
 
     const child = await request(app)
@@ -170,9 +177,11 @@ describe('children + policy', () => {
   });
 
   it('rejects invalid tier', async () => {
+    const email = uniqueEmail();
     const signup = await request(app)
       .post('/api/v1/auth/signup')
-      .send({ email: uniqueEmail(), password: 'parentpw12345' });
+      .send({ email, password: 'parentpw12345' });
+    await verifyEmailFor(email);
     const token = signup.body.token;
 
     const r = await request(app)
@@ -185,9 +194,11 @@ describe('children + policy', () => {
 
 describe('device api keys', () => {
   it('parent generates a key, key is shown once', async () => {
+    const email = uniqueEmail();
     const signup = await request(app)
       .post('/api/v1/auth/signup')
-      .send({ email: uniqueEmail(), password: 'parentpw12345' });
+      .send({ email, password: 'parentpw12345' });
+    await verifyEmailFor(email);
     const token = signup.body.token;
 
     const child = await request(app)
@@ -214,12 +225,16 @@ describe('device api keys', () => {
   });
 
   it('refuses to generate keys for another family\'s device', async () => {
+    const emailA = uniqueEmail();
+    const emailB = uniqueEmail();
     const a = await request(app)
       .post('/api/v1/auth/signup')
-      .send({ email: uniqueEmail(), password: 'parentapw1234' });
+      .send({ email: emailA, password: 'parentapw1234' });
     const b = await request(app)
       .post('/api/v1/auth/signup')
-      .send({ email: uniqueEmail(), password: 'parentbpw1234' });
+      .send({ email: emailB, password: 'parentbpw1234' });
+    await verifyEmailFor(emailA);
+    await verifyEmailFor(emailB);
 
     const childA = await request(app)
       .post('/api/v1/children')

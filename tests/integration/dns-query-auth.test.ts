@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import request from 'supertest';
 import * as dnsPacket from 'dns-packet';
 import { app } from '../../src/api/server';
+import { verifyEmailFor } from '../helpers';
 
 let counter = 0;
 const uniqueEmail = () => `doh-${Date.now()}-${++counter}@example.com`;
@@ -18,10 +19,12 @@ function makeDnsQuery(domain: string): Buffer {
 }
 
 async function makeDeviceKey() {
+  const email = uniqueEmail();
   const sig = await request(app)
     .post('/api/v1/auth/signup')
-    .send({ email: uniqueEmail(), password: 'dohauthpw12345' });
+    .send({ email, password: 'dohauthpw12345' });
   const token = sig.body.token;
+  await verifyEmailFor(email);
   const child = await request(app)
     .post('/api/v1/children')
     .set('Authorization', `Bearer ${token}`)

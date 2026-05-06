@@ -56,6 +56,19 @@ and swallowed so a Resend outage never blocks signup or password reset.
 The flow does NOT enumerate accounts: `/forgot-password` returns 200
 even for unknown emails.
 
+**Soft verification gate is live.** `requireVerifiedParent` middleware
+sits behind `requireParentAuth` on:
+
+- `POST /api/v1/children` (new child profile)
+- `POST /api/v1/pairing/claim` (claiming a hardware box)
+
+Unverified parents get `403 {"error":"email_not_verified"}`. Login,
+/me, password reset, and `POST /api/v1/auth/resend-verification` stay
+open so a parent can always sign in, see their verification state,
+and trigger another email. Resend-verification is rate-limited via
+the shared password-reset limiter (5/hour) and is idempotent for
+already-verified parents (returns `{success: true, already_verified: true}`).
+
 ### 4.6 — Audit logging
 
 `audit_log` table records security-relevant actions: signup, login,

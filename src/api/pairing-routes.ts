@@ -2,7 +2,7 @@ import express, { Request, Response } from 'express';
 import crypto from 'crypto';
 import { db } from '../db/connection';
 import { generateApiKey } from '../auth/keys';
-import { requireParentAuth } from '../auth/middleware';
+import { requireParentAuth, requireVerifiedParent } from '../auth/middleware';
 import { validateBody } from './middleware';
 import {
   PairingStartBody,
@@ -106,6 +106,7 @@ router.post(
   '/claim',
   pairingClaimLimiter,
   requireParentAuth,
+  requireVerifiedParent,
   validateBody(PairingClaimBody),
   async (req: Request, res: Response) => {
     const { code: rawCode, child_profile_id } = req.body as {

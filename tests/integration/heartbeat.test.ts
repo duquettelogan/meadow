@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import request from 'supertest';
 import { app } from '../../src/api/server';
 import { db } from '../../src/db/connection';
+import { verifyEmailFor } from '../helpers';
 
 let counter = 0;
 const uniqueEmail = () => `hb-${Date.now()}-${++counter}@example.com`;
@@ -12,6 +13,8 @@ async function makeFamilyChildDeviceWithKey() {
     .post('/api/v1/auth/signup')
     .send({ email, password: 'heartbeatpw1234' });
   const token = signup.body.token;
+  // Bypass the email-verification gate so the fixture can call POST /children.
+  await verifyEmailFor(email);
 
   const child = await request(app)
     .post('/api/v1/children')

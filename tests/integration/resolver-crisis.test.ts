@@ -11,15 +11,18 @@ vi.mock('../../src/resolver/categorize', () => ({
 
 import request from 'supertest';
 import { app } from '../../src/api/server';
+import { verifyEmailFor } from '../helpers';
 
 let counter = 0;
 const uniqueEmail = () => `rc-${Date.now()}-${++counter}@example.com`;
 
 async function makeDeviceKey() {
+  const email = uniqueEmail();
   const signup = await request(app)
     .post('/api/v1/auth/signup')
-    .send({ email: uniqueEmail(), password: 'resolverpw12345' });
+    .send({ email, password: 'resolverpw12345' });
   const token = signup.body.token;
+  await verifyEmailFor(email);
   const child = await request(app)
     .post('/api/v1/children')
     .set('Authorization', `Bearer ${token}`)

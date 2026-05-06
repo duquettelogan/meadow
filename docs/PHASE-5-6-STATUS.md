@@ -12,6 +12,24 @@ not after. Snapshot of what to do and the current status.
   flows today; ready for VPC notifications, account-deletion confirms,
   and any compliance comms the lawyer scopes out in 5.1 / 5.2.
 
+- **Email-verification soft gate (DONE):** `requireVerifiedParent`
+  middleware in `src/auth/middleware.ts`. Applied to the two endpoints
+  that materially expand the account footprint:
+  - `POST /api/v1/children` (creating a new child profile)
+  - `POST /api/v1/pairing/claim` (claiming a hardware box)
+
+  Unverified parents get `403 {"error":"email_not_verified"}`; the
+  dashboard surfaces a "verify your email first" UX and exposes
+  `POST /api/v1/auth/resend-verification` as the recovery path.
+
+  Login, /me, password reset, and resend-verification stay open so an
+  unverified parent can still authenticate, observe their state, and
+  trigger another email — never locked out of recovery. This is the
+  scaffolding the lawyer will need for VPC: the verification floor on
+  child-creation is exactly where the COPPA "verifiable parental
+  consent" check will plug in (5.2 just promotes the gate from "email
+  verified" to "VPC method completed").
+
 ## Phase 5 — Legal / Compliance
 
 ### 5.1 — Privacy lawyer (NOT STARTED)

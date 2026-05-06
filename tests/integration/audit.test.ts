@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import request from 'supertest';
 import { app } from '../../src/api/server';
 import { db } from '../../src/db/connection';
+import { verifyEmailFor } from '../helpers';
 
 let counter = 0;
 const uniqueEmail = () => `audit-${Date.now()}-${++counter}@example.com`;
@@ -36,10 +37,12 @@ describe('audit log', () => {
   });
 
   it('child create + policy update both audited', async () => {
+    const email = uniqueEmail();
     const sig = await request(app)
       .post('/api/v1/auth/signup')
-      .send({ email: uniqueEmail(), password: 'auditpw12345' });
+      .send({ email, password: 'auditpw12345' });
     const token = sig.body.token;
+    await verifyEmailFor(email);
 
     const since = new Date().toISOString();
 

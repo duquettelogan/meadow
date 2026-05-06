@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import request from 'supertest';
 import { app } from '../../src/api/server';
+import { verifyEmailFor } from '../helpers';
 
 let counter = 0;
 const uniqueEmail = () => `pair-${Date.now()}-${++counter}@example.com`;
@@ -12,6 +13,10 @@ async function makeFamilyWithChild() {
     .post('/api/v1/auth/signup')
     .send({ email, password: 'pairingpw12345' });
   const token = signup.body.token;
+  // The email-verification gate (Phase 4.4 follow-up) blocks both
+  // POST /children and POST /pairing/claim for unverified parents.
+  // Bypass it directly here so this fixture can keep building scenarios.
+  await verifyEmailFor(email);
   const child = await request(app)
     .post('/api/v1/children')
     .set('Authorization', `Bearer ${token}`)

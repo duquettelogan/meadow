@@ -217,6 +217,52 @@ router.get('/me', requireParentAuth, async (req: Request, res: Response) => {
 });
 
 /**
+ * Resend verification email. Authenticated; deliberately NOT gated by
+ * requireVerifiedParent (the whole point is for unverified parents to
+ * trigger another email). Rate-limited via passwordResetLimiter so an
+ * attacker with a stolen JWT can't email-bomb the user.
+ *
+ * If the parent is already verified, returns success with a flag so the
+ * dashboard can surface "you're already verified" rather than confusing
+ * the user with an error.
+ */
+router.post(
+  '/resend-verification',
+  passwordResetLimiter,
+  requireParentAuth,
+  async (req: Request, res: Response) => {
+    try {
+      const lookup = await db.query(
+        'SELECT email, email_verified_at FROM parents WHERE id = $1',
+        [req.parent!.parent_id],
+      );
+      if (lookup.rows.length === 0) {
+        res.status(404).json({ error: 'parent not found' });
+        return;
+      }
+      if (lookup.rows[0].email_verified_at) {
+        res.json({ success: true, already_verified: true });
+        return;
+      }
+      const token = newToken();
+      await db.query(
+        `UPDATE parents
+         SET email_verification_token = $1,
+             email_verification_expires_at = NOW() + INTERVAL '${VERIFICATION_TTL_HOURS} hours'
+         WHERE id = $2`,
+        [token, req.parent!.parent_id],
+      );
+      sendVerificationEmail(lookup.rows[0].email, token).catch(() => {});
+      audit(req, 'parent.email.verification.requested');
+      res.json({ success: true });
+    } catch (err) {
+      console.error('resend-verification failed:', err);
+      res.status(500).json({ error: 'internal server error' });
+    }
+  },
+);
+
+/**
  * Verify email — claims a verification token. Idempotent: claiming an
  * already-verified token is a no-op success (so a parent reloading the
  * verify page doesn't see a confusing error).
