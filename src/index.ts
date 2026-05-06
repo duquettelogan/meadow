@@ -35,7 +35,7 @@ async function main() {
   // doesn't exist (i.e. running as the API server, not a paired box).
   startHeartbeat();
 
-  const server = app.listen(PORT, () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Meadow API running on http://localhost:${PORT}`);
   });
 
