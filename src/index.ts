@@ -8,7 +8,6 @@ import { app } from './api/server';
 
 const PORT = Number(process.env.PORT) || 3000;
 
-const PORT = process.env.PORT || 3000;
 async function main() {
   console.log('Starting Meadow...');
   await testConnection();
