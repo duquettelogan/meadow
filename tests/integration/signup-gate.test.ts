@@ -55,7 +55,7 @@ describe('signup gate — env truth table', () => {
     it('signup succeeds without invite_code', async () => {
       const r = await request(app)
         .post('/api/v1/auth/signup')
-        .send({ email: uniqueEmail(), password: 'gatepw12345' });
+        .send({ email: uniqueEmail(), password: 'gatepw123456' });
       expect(r.status).toBe(201);
       expect(r.body.token).toBeTruthy();
     });
@@ -65,7 +65,7 @@ describe('signup gate — env truth table', () => {
         .post('/api/v1/auth/signup')
         .send({
           email: uniqueEmail(),
-          password: 'gatepw12345',
+          password: 'gatepw123456',
           invite_code: 'whatever-this-is-ignored',
         });
       expect(r.status).toBe(201);
@@ -78,7 +78,7 @@ describe('signup gate — env truth table', () => {
     it('signup succeeds without invite_code (env code is ignored when open)', async () => {
       const r = await request(app)
         .post('/api/v1/auth/signup')
-        .send({ email: uniqueEmail(), password: 'gatepw12345' });
+        .send({ email: uniqueEmail(), password: 'gatepw123456' });
       expect(r.status).toBe(201);
     });
 
@@ -87,7 +87,7 @@ describe('signup gate — env truth table', () => {
         .post('/api/v1/auth/signup')
         .send({
           email: uniqueEmail(),
-          password: 'gatepw12345',
+          password: 'gatepw123456',
           invite_code: 'totally-wrong',
         });
       expect(r.status).toBe(201);
@@ -100,7 +100,7 @@ describe('signup gate — env truth table', () => {
     it('signup is fully closed — no invite_code', async () => {
       const r = await request(app)
         .post('/api/v1/auth/signup')
-        .send({ email: uniqueEmail(), password: 'gatepw12345' });
+        .send({ email: uniqueEmail(), password: 'gatepw123456' });
       expect(r.status).toBe(403);
       expect(r.body).toEqual({ error: 'signup_closed' });
     });
@@ -112,7 +112,7 @@ describe('signup gate — env truth table', () => {
         .post('/api/v1/auth/signup')
         .send({
           email: uniqueEmail(),
-          password: 'gatepw12345',
+          password: 'gatepw123456',
           invite_code: 'any-code-at-all',
         });
       expect(r.status).toBe(403);
@@ -125,7 +125,7 @@ describe('signup gate — env truth table', () => {
         .post('/api/v1/auth/signup')
         .send({
           email: uniqueEmail(),
-          password: 'gatepw12345',
+          password: 'gatepw123456',
           invite_code: '   ',
         });
       expect(r.status).toBe(403);
@@ -140,7 +140,7 @@ describe('signup gate — env truth table', () => {
     it('rejects when invite_code is missing', async () => {
       const r = await request(app)
         .post('/api/v1/auth/signup')
-        .send({ email: uniqueEmail(), password: 'gatepw12345' });
+        .send({ email: uniqueEmail(), password: 'gatepw123456' });
       expect(r.status).toBe(403);
       expect(r.body).toEqual({ error: 'signup_closed' });
     });
@@ -150,7 +150,7 @@ describe('signup gate — env truth table', () => {
         .post('/api/v1/auth/signup')
         .send({
           email: uniqueEmail(),
-          password: 'gatepw12345',
+          password: 'gatepw123456',
           invite_code: 'not-the-right-code',
         });
       expect(r.status).toBe(403);
@@ -164,7 +164,7 @@ describe('signup gate — env truth table', () => {
         .post('/api/v1/auth/signup')
         .send({
           email: uniqueEmail(),
-          password: 'gatepw12345',
+          password: 'gatepw123456',
           invite_code: CODE.slice(0, -1), // one char short
         });
       expect(r.status).toBe(403);
@@ -175,7 +175,7 @@ describe('signup gate — env truth table', () => {
         .post('/api/v1/auth/signup')
         .send({
           email: uniqueEmail(),
-          password: 'gatepw12345',
+          password: 'gatepw123456',
           invite_code: CODE,
         });
       expect(r.status).toBe(201);
@@ -189,7 +189,7 @@ describe('signup gate — env truth table', () => {
       delete process.env.SIGNUP_INVITE_CODE;
       const r = await request(app)
         .post('/api/v1/auth/signup')
-        .send({ email: uniqueEmail(), password: 'gatepw12345' });
+        .send({ email: uniqueEmail(), password: 'gatepw123456' });
       expect(r.status).toBe(403);
     });
 
@@ -201,7 +201,7 @@ describe('signup gate — env truth table', () => {
       delete process.env.SIGNUP_INVITE_CODE;
       const r = await request(app)
         .post('/api/v1/auth/signup')
-        .send({ email: uniqueEmail(), password: 'gatepw12345' });
+        .send({ email: uniqueEmail(), password: 'gatepw123456' });
       expect(r.status).toBe(201);
     });
 
@@ -212,7 +212,7 @@ describe('signup gate — env truth table', () => {
         .post('/api/v1/auth/signup')
         .send({
           email: uniqueEmail(),
-          password: 'gatepw12345',
+          password: 'gatepw123456',
           something_random: 'should be rejected',
         });
       expect(r.status).toBe(400);

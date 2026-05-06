@@ -1,0 +1,162 @@
+# IEEE OUI prefix → vendor name. Format matches the official IEEE
+# oui.txt (https://standards-oui.ieee.org/oui/oui.txt) so operators can
+# drop in the full list:
+#
+#   curl -fsSL https://standards-oui.ieee.org/oui/oui.txt > data/oui.txt
+#
+# This shipped file is a small curated subset for the v1 hardware Logan
+# is going to see in friends-and-family alpha households. Unmatched
+# OUIs surface as "Unknown vendor" in the dashboard and the dashboard
+# copy makes it clear the parent can rename the device.
+#
+# Lines starting with # are comments. Other lines must match:
+#   AA-BB-CC   (hex)    Vendor Name Here
+# Parser: src/box/oui.ts.
+
+# ---- Raspberry Pi (the Meadow box itself) ----
+B8-27-EB   (hex)    Raspberry Pi Foundation
+DC-A6-32   (hex)    Raspberry Pi Trading Ltd
+E4-5F-01   (hex)    Raspberry Pi Trading Ltd
+28-CD-C1   (hex)    Raspberry Pi Trading Ltd
+2C-CF-67   (hex)    Raspberry Pi (Trading) Ltd
+D8-3A-DD   (hex)    Raspberry Pi Trading Ltd
+
+# ---- Apple (iPhones, iPads, Macs, Apple TVs) ----
+00-1B-63   (hex)    Apple, Inc.
+00-1F-F3   (hex)    Apple, Inc.
+00-23-12   (hex)    Apple, Inc.
+00-25-00   (hex)    Apple, Inc.
+00-26-08   (hex)    Apple, Inc.
+04-26-65   (hex)    Apple, Inc.
+04-DB-56   (hex)    Apple, Inc.
+0C-30-21   (hex)    Apple, Inc.
+14-99-E2   (hex)    Apple, Inc.
+20-C9-D0   (hex)    Apple, Inc.
+3C-15-C2   (hex)    Apple, Inc.
+40-30-04   (hex)    Apple, Inc.
+44-FB-42   (hex)    Apple, Inc.
+54-26-96   (hex)    Apple, Inc.
+58-55-CA   (hex)    Apple, Inc.
+60-FB-42   (hex)    Apple, Inc.
+68-AB-BC   (hex)    Apple, Inc.
+70-CD-60   (hex)    Apple, Inc.
+7C-D1-C3   (hex)    Apple, Inc.
+84-FC-FE   (hex)    Apple, Inc.
+8C-85-90   (hex)    Apple, Inc.
+98-D6-BB   (hex)    Apple, Inc.
+A4-5E-60   (hex)    Apple, Inc.
+A8-66-7F   (hex)    Apple, Inc.
+B8-09-8A   (hex)    Apple, Inc.
+BC-92-6B   (hex)    Apple, Inc.
+D0-23-DB   (hex)    Apple, Inc.
+F0-DC-E2   (hex)    Apple, Inc.
+
+# ---- Samsung (phones, tablets, smart TVs) ----
+00-12-FB   (hex)    Samsung Electronics Co.,LTD
+08-08-C2   (hex)    Samsung Electronics Co.,LTD
+14-49-E0   (hex)    Samsung Electronics Co.,LTD
+1C-66-AA   (hex)    Samsung Electronics Co.,LTD
+2C-44-01   (hex)    Samsung Electronics Co.,LTD
+38-AA-3C   (hex)    Samsung Electronics Co.,LTD
+4C-3C-16   (hex)    Samsung Electronics Co.,LTD
+5C-0A-5B   (hex)    Samsung Electronics Co.,LTD
+78-25-AD   (hex)    Samsung Electronics Co.,LTD
+8C-77-12   (hex)    Samsung Electronics Co.,LTD
+A0-21-95   (hex)    Samsung Electronics Co.,LTD
+C8-19-F7   (hex)    Samsung Electronics Co.,LTD
+
+# ---- Google (Chromecast, Nest, Pixel) ----
+00-1A-11   (hex)    Google, Inc.
+3C-5A-B4   (hex)    Google, Inc.
+54-60-09   (hex)    Google, Inc.
+6C-AD-F8   (hex)    Google, Inc.
+80-D2-1D   (hex)    Google, Inc.
+A4-77-33   (hex)    Google, Inc.
+F4-F5-D8   (hex)    Google, Inc.
+F4-F5-E8   (hex)    Google, Inc.
+
+# ---- Amazon (Echo, Fire TV, Kindle, Ring) ----
+00-FC-8B   (hex)    Amazon Technologies Inc.
+0C-47-C9   (hex)    Amazon Technologies Inc.
+40-B4-CD   (hex)    Amazon Technologies Inc.
+44-65-0D   (hex)    Amazon Technologies Inc.
+50-DC-E7   (hex)    Amazon Technologies Inc.
+74-C2-46   (hex)    Amazon Technologies Inc.
+8C-85-80   (hex)    Amazon Technologies Inc.
+A0-02-DC   (hex)    Amazon Technologies Inc.
+F0-D2-F1   (hex)    Amazon Technologies Inc.
+
+# ---- Microsoft (Xbox, Surface) ----
+00-15-5D   (hex)    Microsoft Corporation
+00-50-F2   (hex)    Microsoft Corporation
+28-18-78   (hex)    Microsoft Corporation
+3C-83-75   (hex)    Microsoft Corporation
+60-45-BD   (hex)    Microsoft Corporation
+98-5F-D3   (hex)    Microsoft Corporation
+C8-3F-26   (hex)    Microsoft Corporation
+
+# ---- Sony (PlayStation, BRAVIA TVs) ----
+00-01-4A   (hex)    Sony Corporation
+00-D9-D1   (hex)    Sony Corporation
+04-5D-4B   (hex)    Sony Corporation
+30-52-CB   (hex)    Sony Corporation
+54-42-49   (hex)    Sony Interactive Entertainment Inc.
+70-9E-29   (hex)    Sony Corporation
+A0-E4-53   (hex)    Sony Corporation
+BC-60-A7   (hex)    Sony Corporation
+F0-BF-97   (hex)    Sony Corporation
+
+# ---- LG (TVs, phones) ----
+00-1C-62   (hex)    LG Electronics
+00-1F-6B   (hex)    LG Electronics Inc.
+60-E3-AC   (hex)    LG Electronics Inc.
+A0-39-F7   (hex)    LG Electronics Inc.
+AC-0D-1B   (hex)    LG Electronics Inc.
+CC-FA-00   (hex)    LG Electronics Inc.
+
+# ---- Nintendo (Switch) ----
+00-09-BF   (hex)    Nintendo Co., Ltd.
+00-19-1D   (hex)    Nintendo Co., Ltd.
+00-1F-32   (hex)    Nintendo Co., Ltd.
+00-25-A0   (hex)    Nintendo Co., Ltd.
+2C-10-C1   (hex)    Nintendo Co., Ltd.
+58-2F-40   (hex)    Nintendo Co., Ltd.
+98-B6-E9   (hex)    Nintendo Co., Ltd.
+
+# ---- Common router / network gear ----
+00-0C-29   (hex)    VMware, Inc.
+00-50-56   (hex)    VMware, Inc.
+00-1B-2F   (hex)    NETGEAR
+00-1E-2A   (hex)    NETGEAR
+00-26-F2   (hex)    NETGEAR
+1C-3B-F3   (hex)    NETGEAR
+50-C7-BF   (hex)    TP-LINK TECHNOLOGIES CO.,LTD.
+84-16-F9   (hex)    TP-LINK TECHNOLOGIES CO.,LTD.
+14-CC-20   (hex)    TP-LINK TECHNOLOGIES CO.,LTD.
+F8-1A-67   (hex)    TP-LINK TECHNOLOGIES CO.,LTD.
+74-83-C2   (hex)    Ubiquiti Networks Inc.
+24-A4-3C   (hex)    Ubiquiti Networks Inc.
+DC-9F-DB   (hex)    Ubiquiti Networks Inc.
+74-AC-B9   (hex)    Ubiquiti Networks Inc.
+
+# ---- Common smart-home / IoT ----
+50-EC-50   (hex)    Roku, Inc.
+B8-A1-75   (hex)    Roku, Inc.
+CC-6D-A0   (hex)    Roku, Inc.
+00-17-88   (hex)    Philips Lighting BV
+00-23-4E   (hex)    Sonos, Inc.
+B8-E9-37   (hex)    Sonos, Inc.
+54-2A-1B   (hex)    Sonos, Inc.
+
+# ---- Linux desktop / generic Intel + Realtek ----
+00-15-17   (hex)    Intel Corporate
+00-1B-21   (hex)    Intel Corporate
+00-1F-3B   (hex)    Intel Corporate
+00-23-14   (hex)    Intel Corporate
+00-50-43   (hex)    Marvell Semiconductor, Inc.
+00-E0-4C   (hex)    Realtek Semiconductor Corp.
+50-EB-71   (hex)    Intel Corporate
+A4-34-D9   (hex)    Intel Corporate
+
+# Add more by replacing this whole file with the IEEE list. The parser
+# is forward-compatible — it just keys on the AA-BB-CC prefix.

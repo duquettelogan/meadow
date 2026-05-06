@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import crypto from 'crypto';
 import { db } from '../db/connection';
 import { getDailyBlockCount, getTotalsByCategory } from '../db/counters';
 import { authRouter } from './auth-routes';
@@ -23,6 +24,8 @@ import {
   ResolveBody,
   AnalyzeBody,
   HeartbeatBody,
+  DiscoveredDeviceBody,
+  UpdateDeviceBody,
 } from './validation';
 import { resolveLimiter, defaultLimiter } from './rate-limits';
 import { audit } from '../audit/log';
@@ -148,6 +151,10 @@ app.post(
 
 // List all children in the parent's family. Returns each child with
 // today's block count rolled in to avoid N+1 calls from the dashboard.
+//
+// The synthetic Household child (is_household=true) is excluded — it
+// holds the family-wide filter policy and is managed via
+// GET/PUT /api/v1/filter-policy, not by the per-child UI.
 app.get('/api/v1/children', requireParentAuth, async (req, res) => {
   try {
     const result = await db.query(
@@ -157,7 +164,7 @@ app.get('/api/v1/children', requireParentAuth, async (req, res) => {
        LEFT JOIN block_counters b
          ON b.child_profile_id = c.id
         AND b.day = CURRENT_DATE
-       WHERE c.family_id = $1
+       WHERE c.family_id = $1 AND c.is_household = false
        GROUP BY c.id
        ORDER BY c.created_at ASC`,
       [req.parent!.family_id]
@@ -168,6 +175,92 @@ app.get('/api/v1/children', requireParentAuth, async (req, res) => {
     res.status(500).json({ error: 'internal server error' });
   }
 });
+
+// ---------- Family-scoped filter policy ----------
+// In v1, the resolver always uses the family's Household child's
+// filter_policy. These endpoints are the dashboard-facing way to
+// read/update it without exposing the Household-as-child mechanic.
+app.get('/api/v1/filter-policy', requireParentAuth, async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT p.id,
+              p.blocked_categories, p.allowed_domains, p.blocked_domains,
+              p.safe_search_enforce, p.youtube_restrict
+       FROM filter_policies p
+       JOIN child_profiles c ON c.id = p.child_profile_id
+       WHERE c.family_id = $1 AND c.is_household = true`,
+      [req.parent!.family_id]
+    );
+    if (result.rows.length === 0) {
+      // Should not happen post-migration-008, but be defensive — every
+      // family is supposed to have exactly one Household.
+      res.status(404).json({ error: 'household policy not found' });
+      return;
+    }
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'internal server error' });
+  }
+});
+
+app.put(
+  '/api/v1/filter-policy',
+  requireParentAuth,
+  requireVerifiedParent,
+  validateBody(UpdatePolicyBody),
+  async (req, res) => {
+    const {
+      blocked_categories,
+      allowed_domains,
+      blocked_domains,
+      safe_search_enforce,
+      youtube_restrict,
+    } = req.body as {
+      blocked_categories?: string[];
+      allowed_domains?: string[];
+      blocked_domains?: string[];
+      safe_search_enforce?: boolean;
+      youtube_restrict?: boolean;
+    };
+    try {
+      const result = await db.query(
+        `UPDATE filter_policies p SET
+           blocked_categories = COALESCE($1, p.blocked_categories),
+           allowed_domains = COALESCE($2, p.allowed_domains),
+           blocked_domains = COALESCE($3, p.blocked_domains),
+           safe_search_enforce = COALESCE($4, p.safe_search_enforce),
+           youtube_restrict = COALESCE($5, p.youtube_restrict)
+         FROM child_profiles c
+         WHERE p.child_profile_id = c.id
+           AND c.family_id = $6
+           AND c.is_household = true
+         RETURNING p.id`,
+        [
+          blocked_categories ? JSON.stringify(blocked_categories) : null,
+          allowed_domains ? JSON.stringify(allowed_domains) : null,
+          blocked_domains ? JSON.stringify(blocked_domains) : null,
+          safe_search_enforce ?? null,
+          youtube_restrict ?? null,
+          req.parent!.family_id,
+        ]
+      );
+      if (result.rows.length === 0) {
+        res.status(404).json({ error: 'household policy not found' });
+        return;
+      }
+      audit(req, 'family.policy.updated', {
+        target_kind: 'filter_policy',
+        target_id: result.rows[0].id,
+        metadata: { fields_changed: Object.keys(req.body ?? {}) },
+      });
+      res.json({ success: true });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'internal server error' });
+    }
+  }
+);
 
 app.get(
   '/api/v1/children/:childId',
@@ -376,15 +469,21 @@ app.post(
 // List all devices in the parent's family. Joined with child name so the
 // dashboard can render "Living room TV — assigned to Emma" without a
 // second call. Never returns device_token (that's the device's secret).
+//
+// In the v1 household model, child_profile_id on a device is COSMETIC —
+// the resolver always uses the family's Household policy. The dashboard
+// surfaces the assignment so parents can label "this is Emma's iPad"
+// without changing how DNS gets filtered.
 app.get('/api/v1/devices', requireParentAuth, async (req, res) => {
   try {
     const result = await db.query(
       `SELECT d.id, d.platform, d.last_seen,
+              d.hostname, d.manufacturer, d.mac,
               d.child_profile_id, c.name AS child_name
        FROM devices d
        LEFT JOIN child_profiles c ON c.id = d.child_profile_id
        WHERE d.family_id = $1
-       ORDER BY d.last_seen ASC`,
+       ORDER BY d.last_seen DESC NULLS LAST`,
       [req.parent!.family_id]
     );
     res.json({ devices: result.rows });
@@ -393,6 +492,132 @@ app.get('/api/v1/devices', requireParentAuth, async (req, res) => {
     res.status(500).json({ error: 'internal server error' });
   }
 });
+
+// Box-side endpoint: "I just saw this MAC on the LAN, here's what I
+// know about it." Idempotent — the unique constraint on (family_id, mac)
+// turns repeats into UPDATE last_seen + best-effort hostname/manufacturer
+// fill-ins. Auth: device API key (the box's), so the family is taken
+// from req.device.family_id rather than the body.
+//
+// On insert, device_token is generated server-side as `disc_<32 hex>`
+// — discovered devices don't authenticate (nobody has the corresponding
+// api_key), the column just satisfies the NOT NULL UNIQUE constraint.
+app.post(
+  '/api/v1/devices/discovered',
+  requireDeviceAuth,
+  validateBody(DiscoveredDeviceBody),
+  async (req, res) => {
+    const { mac, hostname, manufacturer } = req.body as {
+      mac: string;
+      hostname?: string;
+      manufacturer?: string;
+    };
+    try {
+      const newToken = `disc_${crypto.randomBytes(16).toString('hex')}`;
+      const result = await db.query(
+        `INSERT INTO devices
+           (family_id, mac, hostname, manufacturer, platform, device_token, last_seen)
+         VALUES ($1, $2, $3, $4, 'discovered', $5, NOW())
+         ON CONFLICT (family_id, mac) DO UPDATE SET
+           hostname = COALESCE(EXCLUDED.hostname, devices.hostname),
+           manufacturer = COALESCE(EXCLUDED.manufacturer, devices.manufacturer),
+           last_seen = NOW()
+         RETURNING id, family_id, mac, hostname, manufacturer, platform,
+                   last_seen, child_profile_id, (xmax = 0) AS inserted`,
+        [req.device!.family_id, mac, hostname ?? null, manufacturer ?? null, newToken]
+      );
+      const row = result.rows[0];
+      // Audit only on first sighting — repeated upserts are noise.
+      if (row.inserted) {
+        audit(req, 'device.discovered', {
+          target_kind: 'device',
+          target_id: row.id,
+          metadata: {
+            mac,
+            hostname: hostname ?? null,
+            manufacturer: manufacturer ?? null,
+          },
+        });
+      }
+      delete row.inserted;
+      res.status(200).json(row);
+    } catch (err) {
+      console.error('device discovered failed:', err);
+      res.status(500).json({ error: 'internal server error' });
+    }
+  },
+);
+
+// Cosmetic update of a device — rename (hostname) and/or assign to a
+// child profile. The resolver doesn't read either field for filtering
+// in v1; this is purely how the dashboard labels the row.
+app.patch(
+  '/api/v1/devices/:deviceId',
+  requireParentAuth,
+  requireVerifiedParent,
+  validateBody(UpdateDeviceBody),
+  async (req, res) => {
+    const deviceId = req.params.deviceId as string;
+    const { hostname, child_profile_id } = req.body as {
+      hostname?: string;
+      child_profile_id?: string | null;
+    };
+    try {
+      // Verify the device belongs to the parent's family.
+      const owns = await db.query(
+        'SELECT 1 FROM devices WHERE id = $1 AND family_id = $2',
+        [deviceId, req.parent!.family_id],
+      );
+      if (owns.rows.length === 0) {
+        res.status(403).json({ error: 'forbidden' });
+        return;
+      }
+
+      // If assigning to a child, verify the child belongs to the same
+      // family — and refuse to assign to the synthetic Household child
+      // (it's not a thing the dashboard should expose).
+      if (child_profile_id) {
+        const childOk = await db.query(
+          `SELECT 1 FROM child_profiles
+           WHERE id = $1 AND family_id = $2 AND is_household = false`,
+          [child_profile_id, req.parent!.family_id],
+        );
+        if (childOk.rows.length === 0) {
+          res.status(403).json({ error: 'child not in your family' });
+          return;
+        }
+      }
+
+      // hostname: undefined = leave alone, string = update.
+      // child_profile_id: undefined = leave alone, null = unassign,
+      // string = assign.
+      await db.query(
+        `UPDATE devices SET
+           hostname = COALESCE($1, hostname),
+           child_profile_id = CASE
+             WHEN $2::boolean THEN $3::uuid
+             ELSE child_profile_id
+           END
+         WHERE id = $4`,
+        [
+          hostname ?? null,
+          child_profile_id !== undefined,
+          child_profile_id ?? null,
+          deviceId,
+        ],
+      );
+      audit(req, 'device.updated', {
+        target_kind: 'device',
+        target_id: deviceId,
+        metadata: { fields_changed: Object.keys(req.body ?? {}) },
+      });
+      res.json({ success: true });
+    } catch (err) {
+      console.error('device patch failed:', err);
+      res.status(500).json({ error: 'internal server error' });
+    }
+  },
+);
 
 app.get(
   '/api/v1/children/:childId/devices',

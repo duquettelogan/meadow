@@ -4,6 +4,7 @@ import { loadBlocklist } from './cache/blocklist';
 import { startScheduler, stopScheduler } from './intel/updater';
 import { startDnsServer, stopDnsServer } from './dns/udp-server';
 import { startHeartbeat, stopHeartbeat } from './box/heartbeat';
+import { startDiscovery, stopDiscovery } from './box/discover';
 import { app } from './api/server';
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -35,6 +36,10 @@ async function main() {
   // doesn't exist (i.e. running as the API server, not a paired box).
   startHeartbeat();
 
+  // LAN device discovery — ARP poll + best-effort DHCP sniff. Same
+  // gating as heartbeat: no-op without a paired state.json + api_key.
+  startDiscovery();
+
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Meadow API running on http://localhost:${PORT}`);
   });
@@ -43,6 +48,7 @@ async function main() {
     console.log(`\n[${signal}] shutting down...`);
     stopScheduler();
     stopHeartbeat();
+    stopDiscovery();
     await stopDnsServer().catch(() => {});
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(1), 5000).unref();

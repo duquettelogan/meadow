@@ -12,6 +12,70 @@ Authorization: Bearer <parent_jwt>
 
 ---
 
+## v1 household refactor (breaking surface changes)
+
+- **One filter policy per family.** The dashboard should drive the
+  filter policy through the new family-scoped endpoints below — the
+  per-child policy routes still exist but are inert in v1 (the resolver
+  only ever consults the Household).
+- **Pairing is family-scoped.** `POST /api/v1/pairing/claim` no longer
+  requires (or uses) `child_profile_id`. Older dashboards still sending
+  it get accepted; the value is silently dropped.
+- **Devices auto-discover.** The box itself sniffs the LAN and POSTs
+  to `/api/v1/devices/discovered` for every MAC it sees. The dashboard
+  surfaces these via `GET /api/v1/devices` (now includes hostname,
+  manufacturer, mac, last_seen) and lets the parent rename / assign
+  them via `PATCH /api/v1/devices/:id`. Assignment is **cosmetic**
+  in v1 — DNS filtering doesn't change based on which device asks.
+- **Household child is hidden.** Signup auto-creates an
+  `is_household=true` child profile. `GET /api/v1/children` excludes
+  it. The dashboard never needs to render or expose it.
+
+### `GET /api/v1/filter-policy`
+
+Family-scoped read of the Household policy.
+
+- **Auth:** `requireParentAuth`
+- **Body:** none
+- **Response:** `{id, blocked_categories, allowed_domains, blocked_domains, safe_search_enforce, youtube_restrict}`
+- **404 `{"error":"household policy not found"}`** if the family
+  somehow lacks a Household child (shouldn't happen post-migration-008).
+
+### `PUT /api/v1/filter-policy`
+
+Update the Household policy. Partial updates supported (omit a field
+to leave it alone — same shape as the older `PATCH /children/:id/policy`).
+
+- **Auth:** `requireParentAuth` + `requireVerifiedParent`
+- **Body:** any subset of
+  `{blocked_categories, allowed_domains, blocked_domains, safe_search_enforce, youtube_restrict}`
+- **200 `{"success": true}`** — applied within ~60s on the box (policy
+  loader caches).
+
+### `POST /api/v1/devices/discovered`
+
+Box-side endpoint. The dashboard does not call this directly. Listed
+here for completeness because the dashboard surfaces the rows it
+creates via `GET /api/v1/devices`.
+
+- **Auth:** **device API key** (the box's, not parent JWT)
+- **Body:** `{mac, hostname?, manufacturer?}`
+- **Idempotent** on `(family_id, mac)` — repeats UPDATE last_seen and
+  fill in missing hostname/manufacturer; never duplicates rows.
+
+### `PATCH /api/v1/devices/:deviceId`
+
+Cosmetic rename + assign-to-child.
+
+- **Auth:** `requireParentAuth` + `requireVerifiedParent`
+- **Body:**
+  - `hostname?: string` — set/rename. Omit to leave alone.
+  - `child_profile_id?: string | null` — UUID assigns, `null` unassigns,
+    omit leaves alone. **Refuses** to assign to the synthetic Household
+    child (returns `403`). Refuses cross-family `child_profile_id` (`403`).
+- **200 `{"success": true}`** on update. `403 forbidden` if the device
+  isn't in the parent's family.
+
 ## Recently added endpoints
 
 ### `DELETE /api/v1/children/:childId`
@@ -130,14 +194,22 @@ the full picture in one place:
 - `DELETE /api/v1/auth/devices/:deviceId/keys/:keyId` — revoke single key
 - `GET  /api/v1/families/me`
 - `POST /api/v1/children` — body `{name, tier?}` (verified parents only)
-- `GET  /api/v1/children`
+- `GET  /api/v1/children` — Household excluded
 - `GET  /api/v1/children/:childId`
-- `PATCH /api/v1/children/:childId/policy`
+- `PATCH /api/v1/children/:childId/policy` — **inert in v1** (resolver
+  only reads Household policy; kept for forward-compat with v2 per-child
+  resolution)
+- `DELETE /api/v1/children/:id` — verified parents only
 - `GET  /api/v1/children/:childId/devices`
 - `GET  /api/v1/children/:childId/blocks/today`
 - `GET  /api/v1/children/:childId/blocks/totals`
+- `GET  /api/v1/filter-policy` — read the family's Household policy
+- `PUT  /api/v1/filter-policy` — update Household policy (verified parents only)
 - `POST /api/v1/devices/register` — body `{platform, device_token, child_profile_id?}`
-- `GET  /api/v1/devices`
+- `GET  /api/v1/devices` — now returns `{id, platform, last_seen, hostname, manufacturer, mac, child_profile_id, child_name}`
+- `PATCH /api/v1/devices/:id` — cosmetic rename + assign-to-child (verified parents only)
+- `DELETE /api/v1/devices/:id` — verified parents only
+- `POST /api/v1/devices/discovered` — device-key auth, idempotent on (family_id, mac)
 - `POST /api/v1/devices/heartbeat` — device-key auth, not parent
 - `POST /api/v1/pairing/start` — public, body `{hardware_id, platform}`
 - `POST /api/v1/pairing/claim` — body `{code, child_profile_id}` (verified parents only)

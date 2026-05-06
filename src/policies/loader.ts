@@ -1,19 +1,23 @@
 import { db } from '../db/connection';
 
 /**
- * Per-child filter policy loader.
+ * Per-family filter policy loader.
  *
- * The UDP DNS handler needs the box's child policy on every query. We
- * cache it in-process for 60 seconds so dashboard toggles propagate
- * within that window without hammering Postgres on every lookup.
+ * In v1 every family has exactly one Household child (created at
+ * signup, marked is_household=true) whose filter_policies row is the
+ * single source of DNS-filtering rules for that family. This loader
+ * resolves family_id → that policy, with an in-process 60s TTL cache
+ * so dashboard toggles propagate within a minute without hammering PG
+ * on every DNS query.
  *
- * v1 assumption: one box → one child profile, so the cache is tiny
- * (one entry). When/if we go multi-child-per-box this still scales —
- * Map by child_profile_id with TTL is fine for hundreds of entries.
+ * Cache is keyed by family_id. v0 was keyed by child_profile_id; the
+ * older getPolicyForChild + matchesDomainList exports kept around
+ * lower in the file are still used by the resolver/UDP handler test
+ * surface but are not the resolver's primary path.
  *
- * Domains in the parent's allowed/blocked lists match either the exact
- * domain or any subdomain (consistent with how the categorized blocklist
- * matches). Stored lower-cased and trailing-dot-stripped.
+ * Domains in the parent's allowed/blocked lists match either the
+ * exact domain or any subdomain (consistent with how the categorized
+ * blocklist matches). Stored lower-cased and trailing-dot-stripped.
  */
 
 const TTL_MS = 60_000;
@@ -32,13 +36,46 @@ interface CachedEntry {
   loadedAt: number;
 }
 
-const cache = new Map<string, CachedEntry>();
+const familyCache = new Map<string, CachedEntry>();
+const childCache = new Map<string, CachedEntry>();
 
+export async function getPolicyForFamily(
+  family_id: string,
+): Promise<FilterPolicy | null> {
+  const now = Date.now();
+  const entry = familyCache.get(family_id);
+  if (entry && now - entry.loadedAt < TTL_MS) {
+    return entry.policy;
+  }
+
+  const result = await db.query(
+    `SELECT p.child_profile_id,
+            COALESCE(p.blocked_categories, '[]'::jsonb) AS blocked_categories,
+            COALESCE(p.allowed_domains,    '[]'::jsonb) AS allowed_domains,
+            COALESCE(p.blocked_domains,    '[]'::jsonb) AS blocked_domains,
+            p.safe_search_enforce, p.youtube_restrict
+     FROM filter_policies p
+     JOIN child_profiles c ON c.id = p.child_profile_id
+     WHERE c.family_id = $1 AND c.is_household = true
+     LIMIT 1`,
+    [family_id],
+  );
+
+  const policy = parseRow(result.rows[0]);
+  familyCache.set(family_id, { policy, loadedAt: now });
+  return policy;
+}
+
+/**
+ * Per-child loader, kept for back-compat with tests + any pre-v1
+ * code path that still passes a child_profile_id directly. The
+ * resolver's hot path uses getPolicyForFamily.
+ */
 export async function getPolicyForChild(
   child_profile_id: string,
 ): Promise<FilterPolicy | null> {
   const now = Date.now();
-  const entry = cache.get(child_profile_id);
+  const entry = childCache.get(child_profile_id);
   if (entry && now - entry.loadedAt < TTL_MS) {
     return entry.policy;
   }
@@ -55,20 +92,21 @@ export async function getPolicyForChild(
     [child_profile_id],
   );
 
-  let policy: FilterPolicy | null = null;
-  if (result.rows[0]) {
-    const row = result.rows[0];
-    policy = {
-      child_profile_id: row.child_profile_id,
-      blocked_categories: normalizeArr(row.blocked_categories),
-      allowed_domains: normalizeArr(row.allowed_domains).map(normalizeDomain),
-      blocked_domains: normalizeArr(row.blocked_domains).map(normalizeDomain),
-      safe_search_enforce: !!row.safe_search_enforce,
-      youtube_restrict: !!row.youtube_restrict,
-    };
-  }
-  cache.set(child_profile_id, { policy, loadedAt: now });
+  const policy = parseRow(result.rows[0]);
+  childCache.set(child_profile_id, { policy, loadedAt: now });
   return policy;
+}
+
+function parseRow(row: any): FilterPolicy | null {
+  if (!row) return null;
+  return {
+    child_profile_id: row.child_profile_id,
+    blocked_categories: normalizeArr(row.blocked_categories),
+    allowed_domains: normalizeArr(row.allowed_domains).map(normalizeDomain),
+    blocked_domains: normalizeArr(row.blocked_domains).map(normalizeDomain),
+    safe_search_enforce: !!row.safe_search_enforce,
+    youtube_restrict: !!row.youtube_restrict,
+  };
 }
 
 /**
@@ -108,5 +146,6 @@ function normalizeDomain(d: string): string {
  * Test helper. Don't call in production.
  */
 export function _resetPolicyCacheForTests(): void {
-  cache.clear();
+  familyCache.clear();
+  childCache.clear();
 }

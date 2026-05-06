@@ -100,7 +100,11 @@ router.post(
 
 /**
  * POST /api/v1/pairing/claim
- * Parent claims a code from the dashboard, assigning the device to a child.
+ * Parent claims a code from the dashboard. The pairing binds the box
+ * to the parent's family — there's no per-child binding in v1. The
+ * dashboard can label the device cosmetically via PATCH /devices/:id
+ * after the fact. The body MAY still include child_profile_id for
+ * back-compat with older dashboards, but it's ignored on the server.
  */
 router.post(
   '/claim',
@@ -109,27 +113,15 @@ router.post(
   requireVerifiedParent,
   validateBody(PairingClaimBody),
   async (req: Request, res: Response) => {
-    const { code: rawCode, child_profile_id } = req.body as {
+    const { code: rawCode } = req.body as {
       code: string;
-      child_profile_id: string;
+      child_profile_id?: string; // accepted, ignored
     };
     const code = normalizeCode(rawCode);
 
     const client = await db.connect();
     try {
       await client.query('BEGIN');
-
-      // Verify the child belongs to this parent's family.
-      const childCheck = await client.query(
-        `SELECT 1 FROM child_profiles
-         WHERE id = $1 AND family_id = $2`,
-        [child_profile_id, req.parent!.family_id]
-      );
-      if (childCheck.rows.length === 0) {
-        await client.query('ROLLBACK');
-        res.status(403).json({ error: 'child not in your family' });
-        return;
-      }
 
       // Look up + lock the pairing row.
       const pairing = await client.query(
@@ -157,25 +149,20 @@ router.post(
         return;
       }
 
-      // Create the device row in the parent's family.
-      // The hardware_id from the pairing flow becomes the device_token —
-      // the device already knows it, no new secret to communicate.
+      // Create the device row in the parent's family — no child binding
+      // (the resolver uses the family's Household policy regardless).
+      // The hardware_id from the pairing flow becomes the device_token.
       const deviceResult = await client.query(
         `INSERT INTO devices (family_id, child_profile_id, platform, device_token, last_seen)
-         VALUES ($1, $2, $3, $4, NOW())
+         VALUES ($1, NULL, $2, $3, NOW())
          ON CONFLICT (device_token)
          DO UPDATE SET
            family_id = EXCLUDED.family_id,
-           child_profile_id = EXCLUDED.child_profile_id,
+           child_profile_id = NULL,
            platform = EXCLUDED.platform,
            last_seen = NOW()
          RETURNING id`,
-        [
-          req.parent!.family_id,
-          child_profile_id,
-          row.platform,
-          row.hardware_id,
-        ]
+        [req.parent!.family_id, row.platform, row.hardware_id]
       );
       const deviceId = deviceResult.rows[0].id;
 
@@ -190,15 +177,25 @@ router.post(
       );
       const apiKeyId = apiKeyResult.rows[0].id;
 
+      // Stash family_id on pairing_codes so the claim record is
+      // family-scoped without needing a parent → family lookup later.
       await client.query(
         `UPDATE pairing_codes
          SET claimed_at = NOW(),
              claimed_by_parent_id = $1,
-             device_id = $2,
-             api_key_id = $3,
-             plaintext_key = $4
-         WHERE id = $5`,
-        [req.parent!.parent_id, deviceId, apiKeyId, key.plaintext, row.id]
+             family_id = $2,
+             device_id = $3,
+             api_key_id = $4,
+             plaintext_key = $5
+         WHERE id = $6`,
+        [
+          req.parent!.parent_id,
+          req.parent!.family_id,
+          deviceId,
+          apiKeyId,
+          key.plaintext,
+          row.id,
+        ]
       );
 
       await client.query('COMMIT');
@@ -207,14 +204,14 @@ router.post(
         target_kind: 'device',
         target_id: deviceId,
         metadata: {
-          child_profile_id,
           platform: row.platform,
+          family_id: req.parent!.family_id,
         },
       });
 
       res.json({
         device_id: deviceId,
-        child_profile_id,
+        family_id: req.parent!.family_id,
         platform: row.platform,
       });
     } catch (err) {

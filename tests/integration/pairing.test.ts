@@ -90,7 +90,12 @@ describe('pairing flow', () => {
     expect(evil.status).toBe(401);
   });
 
-  it('rejects claim from another family', async () => {
+  it('claim ignores child_profile_id (pairing is family-scoped in v1)', async () => {
+    // v0 used to reject this case ("child not in your family") because
+    // pairing required a child binding. In v1 the claim only binds to
+    // the authenticated parent's family — child_profile_id in the body
+    // is accepted for back-compat with older dashboards but ignored on
+    // the server. See the pairing claim handler in src/api/pairing-routes.ts.
     const a = await makeFamilyWithChild();
     const b = await makeFamilyWithChild();
     const hardware_id = uniqueHwId();
@@ -100,12 +105,15 @@ describe('pairing flow', () => {
       .send({ hardware_id, platform: 'router' });
     const code = start.body.code;
 
-    // Parent B tries to assign to parent A's child.
+    // Parent B passes parent A's childId — server should ignore it
+    // and pair the device into parent B's family.
     const cross = await request(app)
       .post('/api/v1/pairing/claim')
       .set('Authorization', `Bearer ${b.token}`)
       .send({ code, child_profile_id: a.childId });
-    expect(cross.status).toBe(403);
+    expect(cross.status).toBe(200);
+    expect(cross.body.family_id).toBeTruthy();
+    expect(cross.body.device_id).toBeTruthy();
   });
 
   it('rejects unknown code', async () => {

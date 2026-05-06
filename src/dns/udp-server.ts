@@ -1,7 +1,7 @@
 import dgram from 'dgram';
 import { handleDnsQuery } from './handler';
 import { loadBoxContext, getBoxContext } from '../box/context';
-import { getPolicyForChild } from '../policies/loader';
+import { getPolicyForFamily } from '../policies/loader';
 
 /**
  * UDP DNS server.
@@ -62,14 +62,17 @@ export async function startDnsServer(): Promise<void> {
     sock.on('message', async (msg, rinfo) => {
       try {
         const ctx = getBoxContext();
-        const policy = ctx?.child_profile_id
-          ? await getPolicyForChild(ctx.child_profile_id).catch((err) => {
+        // Resolve uses the family's Household policy in v1. Counter
+        // increments are attributed to the Household child (single
+        // source of truth for family-wide counts).
+        const policy = ctx?.family_id
+          ? await getPolicyForFamily(ctx.family_id).catch((err) => {
               console.error('[dns] policy load failed:', err);
               return null;
             })
           : null;
         const response = await handleDnsQuery(msg, {
-          childProfileId: ctx?.child_profile_id ?? null,
+          childProfileId: ctx?.household_child_id ?? null,
           policy,
         });
         sock.send(new Uint8Array(response), rinfo.port, rinfo.address, (err) => {

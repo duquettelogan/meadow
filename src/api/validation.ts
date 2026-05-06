@@ -103,6 +103,37 @@ export const RegisterDeviceBody = z
   })
   .strict();
 
+// MAC address: hex pairs separated by : or - (case-insensitive).
+// Normalized to lowercase colon-separated form.
+const macAddress = z
+  .string()
+  .regex(
+    /^[0-9a-f]{2}([:-][0-9a-f]{2}){5}$/i,
+    'invalid mac (expected aa:bb:cc:dd:ee:ff)',
+  )
+  .transform((s) => s.toLowerCase().replace(/-/g, ':'));
+
+// /devices/discovered: box-side client telling the API "I saw this MAC
+// on the LAN." Hostname + manufacturer best-effort (from DHCP option 12
+// and OUI lookup respectively).
+export const DiscoveredDeviceBody = z
+  .object({
+    mac: macAddress,
+    hostname: z.string().min(1).max(255).optional(),
+    manufacturer: z.string().min(1).max(255).optional(),
+  })
+  .strict();
+
+// PATCH /devices/:id — cosmetic rename + optional child assignment.
+// child_profile_id can be set to a UUID (assign), null (unassign), or
+// omitted (leave alone).
+export const UpdateDeviceBody = z
+  .object({
+    hostname: z.string().min(1).max(255).optional(),
+    child_profile_id: uuid.nullable().optional(),
+  })
+  .strict();
+
 // ---------- Resolver ----------
 export const ResolveBody = z
   .object({
@@ -154,10 +185,14 @@ export const PairingStartBody = z
   })
   .strict();
 
+// child_profile_id is now optional and ignored — pairing binds to the
+// family, not to a specific child. The field is left in the schema so
+// older clients (Base44 dashboards mid-rollout) don't get a 400 from
+// .strict(); they get accepted, the value is dropped on the server.
 export const PairingClaimBody = z
   .object({
     code: pairingCode,
-    child_profile_id: uuid,
+    child_profile_id: uuid.optional(),
   })
   .strict();
 
