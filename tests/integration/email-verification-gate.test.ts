@@ -16,21 +16,25 @@ async function signup(email: string) {
 }
 
 describe('email-verification gate', () => {
-  describe('POST /api/v1/children', () => {
-    it('returns 403 email_not_verified for unverified parent', async () => {
+  describe('POST /api/v1/children — NOT gated (just metadata)', () => {
+    it('lets an unverified parent create a child profile (201)', async () => {
       const sig = await signup(uniqueEmail());
       expect(sig.status).toBe(201);
 
       const r = await request(app)
         .post('/api/v1/children')
         .set('Authorization', `Bearer ${sig.body.token}`)
-        .send({ name: 'GatedKid' });
+        .send({ name: 'UngatedKid' });
 
-      expect(r.status).toBe(403);
-      expect(r.body).toEqual({ error: 'email_not_verified' });
+      // Hot patch fix/unblock-children-without-email-verify: adding
+      // a kid's name is just metadata. The gate stays on
+      // /pairing/claim (the truly sensitive action — binding a
+      // physical box to the family).
+      expect(r.status).toBe(201);
+      expect(r.body.name).toBe('UngatedKid');
     });
 
-    it('returns 201 for verified parent', async () => {
+    it('still works for a verified parent (regression check)', async () => {
       const email = uniqueEmail();
       const sig = await signup(email);
       await verifyEmailFor(email);
@@ -43,7 +47,7 @@ describe('email-verification gate', () => {
       expect(r.status).toBe(201);
     });
 
-    it('still requires auth (gate runs after auth)', async () => {
+    it('still requires auth', async () => {
       const r = await request(app)
         .post('/api/v1/children')
         .send({ name: 'NoAuthKid' });
@@ -51,33 +55,29 @@ describe('email-verification gate', () => {
     });
   });
 
-  describe('POST /api/v1/pairing/claim', () => {
+  describe('POST /api/v1/pairing/claim — STILL gated', () => {
     it('returns 403 email_not_verified for unverified parent', async () => {
-      // Build a parent + child + pairing code without verifying email,
-      // then prove the claim is the gate (we have to verify, create
-      // child, un-verify before this would normally be impossible —
-      // so instead we set the floor: verify, create child, un-verify,
-      // then attempt claim).
+      // Build a parent + child + pairing code as a verified parent,
+      // then roll back the verification so we hit the gate at claim
+      // time. /children is now ungated so we can create the child
+      // either before or after un-verifying — doing it after to
+      // double-check that side stays open.
       const email = uniqueEmail();
       const sig = await signup(email);
-      await verifyEmailFor(email);
+
       const child = await request(app)
         .post('/api/v1/children')
         .set('Authorization', `Bearer ${sig.body.token}`)
         .send({ name: 'PairKid' });
+      // /children no longer gated — this works without verification.
       expect(child.status).toBe(201);
-
-      // Roll back the verification so the parent is now unverified again.
-      await db.query(
-        'UPDATE parents SET email_verified_at = NULL WHERE email = $1',
-        [email.toLowerCase()],
-      );
 
       const start = await request(app)
         .post('/api/v1/pairing/start')
         .send({ hardware_id: uniqueHwId(), platform: 'router' });
       expect(start.status).toBe(201);
 
+      // Parent is still unverified — claim must reject.
       const claim = await request(app)
         .post('/api/v1/pairing/claim')
         .set('Authorization', `Bearer ${sig.body.token}`)
