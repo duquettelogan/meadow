@@ -6,8 +6,9 @@ import { startDnsServer, stopDnsServer } from './dns/udp-server';
 import { startHeartbeat, stopHeartbeat } from './box/heartbeat';
 import { app } from './api/server';
 
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
+const PORT = process.env.PORT || 3000;
 async function main() {
   console.log('Starting Meadow...');
   await testConnection();
