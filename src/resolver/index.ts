@@ -3,6 +3,8 @@ import { getCachedVerdict, setCachedVerdict } from '../cache/index';
 import { categorizeDomain } from './categorize';
 import { getBlockCategory } from '../cache/blocklist';
 import { incrementBlockCounter } from '../db/counters';
+import { isCrisisDomain } from '../intel/crisis-floor';
+import { isCaptivePortalDomain } from '../intel/captive-portal-allowlist';
 
 const HARDCODED_ALLOWLIST = new Set([
   'google.com',
@@ -35,6 +37,36 @@ export async function resolve(
 ): Promise<ResolverResult> {
   const start = Date.now();
   const normalized = domain.toLowerCase().replace(/\.$/, '');
+
+  // Step -1: crisis floor — checked before EVERYTHING else, including
+  // the per-device cache. Crisis-resource lookups must:
+  //   - return allow regardless of any other rule
+  //   - leave NO entry in our cache (so an admin can't see a crisis
+  //     domain in cache state)
+  //   - never call incrementBlockCounter
+  // Same privacy contract as the UDP path. See src/intel/crisis-floor.ts.
+  if (isCrisisDomain(normalized)) {
+    return {
+      domain: normalized,
+      verdict: 'allow',
+      category: null,
+      reason: 'crisis_floor',
+      latency_ms: Date.now() - start,
+    };
+  }
+
+  // Step -0.5: captive portal allowlist — also checked before the cache
+  // so devices behind the resolver can complete connectivity checks even
+  // if a stale cache entry says block.
+  if (isCaptivePortalDomain(normalized)) {
+    return {
+      domain: normalized,
+      verdict: 'allow',
+      category: null,
+      reason: 'captive_portal',
+      latency_ms: Date.now() - start,
+    };
+  }
 
   // Step 0: per-device cache.
   const cached = await getCachedVerdict(deviceToken, normalized);

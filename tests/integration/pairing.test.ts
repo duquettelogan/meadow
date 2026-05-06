@@ -29,7 +29,7 @@ describe('pairing flow', () => {
       .post('/api/v1/pairing/start')
       .send({ hardware_id, platform: 'router' });
     expect(start.status).toBe(201);
-    expect(start.body.code).toMatch(/^\d{3}-\d{3}$/);
+    expect(start.body.code).toMatch(/^\d{4}-\d{4}$/);
 
     const code = start.body.code;
 
@@ -108,7 +108,7 @@ describe('pairing flow', () => {
     const r = await request(app)
       .post('/api/v1/pairing/claim')
       .set('Authorization', `Bearer ${token}`)
-      .send({ code: '999-999', child_profile_id: childId });
+      .send({ code: '9999-9999', child_profile_id: childId });
     expect(r.status).toBe(404);
   });
 
@@ -136,7 +136,7 @@ describe('pairing flow', () => {
   it('claim requires auth', async () => {
     const r = await request(app)
       .post('/api/v1/pairing/claim')
-      .send({ code: '123-456', child_profile_id: '00000000-0000-0000-0000-000000000000' });
+      .send({ code: '1234-5678', child_profile_id: '00000000-0000-0000-0000-000000000000' });
     expect(r.status).toBe(401);
   });
 

@@ -2,13 +2,24 @@
 # DoH bypass blocking smoke test.
 #
 # Verifies the resolver blocks known DoH endpoints once the intel feed has
-# populated Redis. Requires a running server.
+# populated Redis. Requires a running server AND a paired device API key
+# (Phase 4.1: /dns-query is now Bearer-gated to prevent open recursive
+# resolver abuse).
 #
 # Usage:
-#   ./scripts/test-doh-blocking.sh
+#   MEADOW_API_KEY=mk_... ./scripts/test-doh-blocking.sh
+#
+# Get an API key by walking through the pairing flow once with sim-device:
+#   npx ts-node scripts/sim-device.ts
+#   # ...claim the code in the dashboard, then read the key from .sim-device.json
 
 set -u
 BASE="${BASE_URL:-http://localhost:3000}"
+API_KEY="${MEADOW_API_KEY:-}"
+if [ -z "$API_KEY" ]; then
+  printf "\033[31mFAIL\033[0m  set MEADOW_API_KEY=mk_... before running (see header)\n" >&2
+  exit 2
+fi
 
 pass() { printf "  \033[32mPASS\033[0m  %s\n" "$1"; }
 fail() { printf "  \033[31mFAIL\033[0m  %s\n" "$1"; FAILED=1; }
@@ -106,7 +117,7 @@ code=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/health")
 section "2. DoH bypass domains return 0.0.0.0 (blocked)"
 for domain in "${DOH_DOMAINS[@]}"; do
   query=$(encode_query "$domain")
-  ip=$(curl -s "$BASE/dns-query?dns=$query" | extract_ip)
+  ip=$(curl -s -H "Authorization: Bearer $API_KEY" "$BASE/dns-query?dns=$query" | extract_ip)
   if [ "$ip" = "0.0.0.0" ]; then
     pass "$domain → blocked"
   else
@@ -117,7 +128,7 @@ done
 section "3. Safe domains resolve normally (not blocked by doh_bypass)"
 for domain in "${SAFE_DOMAINS[@]}"; do
   query=$(encode_query "$domain")
-  ip=$(curl -s "$BASE/dns-query?dns=$query" | extract_ip)
+  ip=$(curl -s -H "Authorization: Bearer $API_KEY" "$BASE/dns-query?dns=$query" | extract_ip)
   if [ "$ip" = "0.0.0.0" ]; then
     fail "$domain → unexpectedly blocked (got 0.0.0.0)"
   elif [ "$ip" = "no_answer" ] || [ "$ip" = "short" ] || [ "$ip" = "truncated" ]; then

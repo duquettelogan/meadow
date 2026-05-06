@@ -111,6 +111,21 @@ export const AnalyzeBody = z
   })
   .strict();
 
+// ---------- Heartbeat ----------
+// Box health snapshot. All fields optional so we can extend the contract
+// without breaking older boxes.
+export const HeartbeatBody = z
+  .object({
+    ts: z.number().int().nonnegative().optional(),
+    uptime_seconds: z.number().int().nonnegative().max(60 * 60 * 24 * 365 * 10).optional(),
+    free_memory_mb: z.number().int().nonnegative().max(1024 * 1024).optional(),
+    blocklist_versions: z
+      .record(z.string().max(80), z.union([z.string().max(120), z.number()]))
+      .optional(),
+    box_version: z.string().max(80).optional(),
+  })
+  .strict();
+
 // ---------- Pairing ----------
 const hardwareId = z
   .string()
@@ -118,13 +133,14 @@ const hardwareId = z
   .max(128)
   .regex(/^[a-zA-Z0-9_-]+$/, 'invalid hardware_id');
 
-// Code format: XXX-XXX or XXXXXX (digits only). We accept both for forgiving
-// parent input — server normalizes by stripping non-digits.
+// Code format: XXXX-XXXX or XXXXXXXX (8 digits). 100M combinations,
+// 100x harder to brute force than the v0 6-digit code. Server
+// normalizes by stripping non-digits before lookup.
 const pairingCode = z
   .string()
-  .min(6)
-  .max(7)
-  .regex(/^[\d]{3}-?[\d]{3}$/, 'invalid pairing code (expected XXX-XXX)');
+  .min(8)
+  .max(9)
+  .regex(/^[\d]{4}-?[\d]{4}$/, 'invalid pairing code (expected XXXX-XXXX)');
 
 export const PairingStartBody = z
   .object({
@@ -144,6 +160,35 @@ export const PairingPollBody = z
   .object({
     code: pairingCode,
     hardware_id: hardwareId,
+  })
+  .strict();
+
+// ---------- Email verification + password recovery ----------
+const recoveryToken = z.string().min(20).max(200).regex(/^[a-zA-Z0-9_-]+$/);
+
+export const VerifyEmailBody = z
+  .object({
+    token: recoveryToken,
+  })
+  .strict();
+
+export const ForgotPasswordBody = z
+  .object({
+    email,
+  })
+  .strict();
+
+export const ResetPasswordBody = z
+  .object({
+    token: recoveryToken,
+    password,
+  })
+  .strict();
+
+export const ChangePasswordBody = z
+  .object({
+    current_password: z.string().min(1).max(200),
+    new_password: password,
   })
   .strict();
 

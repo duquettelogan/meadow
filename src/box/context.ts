@@ -11,6 +11,10 @@
  * use device-level resolve (per-device API keys) instead. If we add
  * box-level multi-child later, this module becomes a per-source-IP
  * lookup, not a single cached profile.
+ *
+ * The api_key is exposed alongside the IDs because the heartbeat module
+ * needs it to authenticate POSTs to /api/v1/devices/heartbeat. It is
+ * NEVER logged or returned outside the box process.
  */
 
 import * as fs from 'fs';
@@ -27,6 +31,7 @@ interface PersistedState {
 export interface BoxContext {
   device_id: string;
   child_profile_id: string | null;
+  api_key: string | null;
 }
 
 let cached: BoxContext | null = null;
@@ -76,6 +81,7 @@ export async function loadBoxContext(): Promise<BoxContext | null> {
     cached = {
       device_id: state.device_id,
       child_profile_id: result.rows[0].child_profile_id ?? null,
+      api_key: state.api_key ?? null,
     };
     console.log(
       `[box] context loaded: device=${cached.device_id} child=${cached.child_profile_id ?? 'unassigned'}`,

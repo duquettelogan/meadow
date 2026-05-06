@@ -6,11 +6,14 @@ Scripts to install Meadow on a Linux box (Pi, Ubuntu Server, etc.).
 
 - **`install.sh`** — generic Debian/Ubuntu installer. Sets up Node, Postgres,
   Redis, system user, repo, env, migrations, and systemd service. Idempotent.
-- **`pi-setup.sh`** — Pi-specific add-on. Run after `install.sh`. Sets the
-  hostname, configures UFW firewall, installs dnsmasq as DNS frontend,
-  tunes swap for SD card longevity.
+- **`pi-setup.sh`** — Pi-specific add-on. Run after `install.sh`. Configures
+  NTP, hostname, UFW firewall, journald rotation, swap tuning. Verifies
+  outbound connectivity to intel feeds.
 - **`meadow.service`** — systemd unit. Hardened with the usual Protect*
   directives, runs as the `meadow` system user, restarts on failure.
+  Requires `meadow-bootstrap.service` and `time-sync.target`.
+- **`meadow-bootstrap.service`** — `Type=oneshot` pairing unit. Reads/writes
+  `/etc/meadow/state.json`. Must complete before `meadow.service` starts.
 - **`test-deploy.sh`** — Docker-based smoke test. Validates `install.sh`
   works on a clean Ubuntu image without needing real hardware.
 
@@ -87,6 +90,7 @@ to deploy a new version.
 ```sh
 # Logs
 journalctl -u meadow -f
+journalctl -u meadow-bootstrap -n 50      # see pairing code
 
 # Restart after env change
 sudo systemctl restart meadow
@@ -97,6 +101,26 @@ sudo -u meadow bash -c 'set -a; source /etc/meadow/meadow.env; set +a; cd /opt/m
 # Smoke test
 curl http://localhost:3000/health
 ```
+
+## Reset / re-pair
+
+If a box needs to be re-paired (state.json corrupt, API revoked the key,
+new family taking over a hand-me-down box):
+
+```sh
+# Wipe local pairing state and restart bootstrap to get a fresh code.
+sudo rm -f /etc/meadow/state.json
+sudo systemctl restart meadow-bootstrap
+sudo journalctl -u meadow-bootstrap -n 20   # find the new PAIRING CODE
+```
+
+The bootstrap unit prints the new pairing code to journald. Parent enters
+that code in the dashboard, the device claims, the API key + device_id
+are persisted, and `meadow.service` restarts automatically (Requires=).
+
+A hardware reset button (long-press to wipe state.json + reboot) is
+deferred to the v1.5 enclosure once Dane finalizes the design — see
+`src/box/reset-monitor.ts.todo` if you want to pick this up.
 
 ## Security notes
 

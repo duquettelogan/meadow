@@ -21,8 +21,10 @@ import {
   RegisterDeviceBody,
   ResolveBody,
   AnalyzeBody,
+  HeartbeatBody,
 } from './validation';
 import { resolveLimiter, defaultLimiter } from './rate-limits';
+import { audit } from '../audit/log';
 
 const app = express();
 
@@ -125,6 +127,11 @@ app.post(
         'INSERT INTO filter_policies (child_profile_id) VALUES ($1)',
         [child.rows[0].id]
       );
+      audit(req, 'child.created', {
+        target_kind: 'child_profile',
+        target_id: child.rows[0].id,
+        metadata: { name, tier: child.rows[0].tier },
+      });
       res.status(201).json(child.rows[0]);
     } catch (err) {
       console.error(err);
@@ -220,6 +227,13 @@ app.patch(
           childId,
         ]
       );
+      audit(req, 'child.policy.updated', {
+        target_kind: 'child_profile',
+        target_id: childId,
+        metadata: {
+          fields_changed: Object.keys(req.body ?? {}),
+        },
+      });
       res.json({ success: true });
     } catch (err) {
       console.error(err);
@@ -260,6 +274,11 @@ app.post(
          RETURNING id, family_id, child_profile_id, platform, last_seen`,
         [req.parent!.family_id, child_profile_id ?? null, platform, device_token]
       );
+      audit(req, 'device.registered', {
+        target_kind: 'device',
+        target_id: result.rows[0].id,
+        metadata: { platform, child_profile_id: child_profile_id ?? null },
+      });
       res.status(201).json(result.rows[0]);
     } catch (err) {
       console.error(err);
@@ -305,6 +324,40 @@ app.get(
       res.status(500).json({ error: 'internal server error' });
     }
   }
+);
+
+// ---------- Heartbeat ----------
+// Box-side health beacon. Updates devices.last_seen + last_health_payload.
+// Authenticated with the device API key — same auth as /resolve. Privacy
+// posture: payload is bounded by HeartbeatBody validation; no per-query
+// data, no domains, no counts.
+app.post(
+  '/api/v1/devices/heartbeat',
+  requireDeviceAuth,
+  validateBody(HeartbeatBody),
+  async (req, res) => {
+    try {
+      await db.query(
+        `UPDATE devices
+         SET last_seen = NOW(),
+             last_health_payload = $2::jsonb
+         WHERE id = $1`,
+        [req.device!.device_id, JSON.stringify(req.body ?? {})],
+      );
+      // Heartbeats fire every 5 min; we audit only every Nth to avoid
+      // flooding audit_log. Sample roughly 1-in-12 (~hourly per device).
+      if (Math.random() < 0.083) {
+        audit(req, 'box.heartbeat', {
+          target_kind: 'device',
+          target_id: req.device!.device_id,
+        });
+      }
+      res.status(204).end();
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'internal server error' });
+    }
+  },
 );
 
 // ---------- Counters ----------
@@ -403,8 +456,13 @@ app.post(
   }
 );
 
-// DoH stays public — DNS-over-HTTPS clients can't carry custom auth headers.
-app.post('/dns-query', resolveLimiter, async (req, res) => {
+// DoH (RFC 8484) — Phase 4.1: gated behind a device API key so this
+// can't be abused as an open recursive resolver / DDoS amplifier. The
+// home box never uses DoH (it has UDP/53 on the LAN). DoH is intended
+// for the v2 "off-network protection" flow where the device carries a
+// per-device key. Browsers can't currently use this endpoint because
+// the DoH spec doesn't pass auth headers — that's intentional for v1.
+app.post('/dns-query', resolveLimiter, requireDeviceAuth, async (req, res) => {
   try {
     const { handleDoH } = await import('../resolver/doh');
     const result = await handleDoH(req.body);
@@ -416,7 +474,7 @@ app.post('/dns-query', resolveLimiter, async (req, res) => {
   }
 });
 
-app.get('/dns-query', resolveLimiter, async (req, res) => {
+app.get('/dns-query', resolveLimiter, requireDeviceAuth, async (req, res) => {
   try {
     const dnsParam = req.query['dns'] as string;
     if (!dnsParam || dnsParam.length > 4096) {

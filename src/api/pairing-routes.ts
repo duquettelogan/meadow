@@ -10,26 +10,30 @@ import {
   PairingPollBody,
 } from './validation';
 import { pairingClaimLimiter, pairingDeviceLimiter } from './rate-limits';
+import { audit } from '../audit/log';
 
 const router = express.Router();
 
 const CODE_TTL_MINUTES = 10;
 
 /**
- * Generate a 6-digit pairing code, formatted as XXX-XXX.
+ * Generate an 8-digit pairing code, formatted as XXXX-XXXX. 100M codes
+ * means brute force at the rate-limited 10/15min ceiling takes 285 years
+ * in expectation. v0 used 6 digits (1M space) — this is 100x harder.
+ *
  * Uses crypto.randomInt for uniform distribution.
  */
 function generatePairingCode(): string {
-  const n = crypto.randomInt(0, 1_000_000);
-  const padded = n.toString().padStart(6, '0');
-  return `${padded.slice(0, 3)}-${padded.slice(3)}`;
+  const n = crypto.randomInt(0, 100_000_000);
+  const padded = n.toString().padStart(8, '0');
+  return `${padded.slice(0, 4)}-${padded.slice(4)}`;
 }
 
 function normalizeCode(input: string): string {
-  // Accept both "482-915" and "482915" — strip non-digits and re-format.
+  // Accept both "1234-5678" and "12345678" — strip non-digits and reformat.
   const digits = input.replace(/\D/g, '');
-  if (digits.length !== 6) return input;
-  return `${digits.slice(0, 3)}-${digits.slice(3)}`;
+  if (digits.length !== 8) return input;
+  return `${digits.slice(0, 4)}-${digits.slice(4)}`;
 }
 
 /**
@@ -79,6 +83,10 @@ router.post(
          WHERE expires_at < NOW() AND claimed_at IS NULL`
       ).catch(() => {});
 
+      audit(req, 'pairing.started', {
+        target_kind: 'pairing_code',
+        metadata: { hardware_id: hardware_id.slice(0, 64), platform },
+      });
       res.status(201).json({
         code,
         expires_in_seconds: CODE_TTL_MINUTES * 60,
@@ -194,6 +202,15 @@ router.post(
 
       await client.query('COMMIT');
 
+      audit(req, 'pairing.claimed', {
+        target_kind: 'device',
+        target_id: deviceId,
+        metadata: {
+          child_profile_id,
+          platform: row.platform,
+        },
+      });
+
       res.json({
         device_id: deviceId,
         child_profile_id,
@@ -243,6 +260,13 @@ router.post(
 
       // Hardware ID must match. Mismatch = code-stealing attempt.
       if (row.hardware_id !== hardware_id) {
+        audit(req, 'pairing.poll.hardware_mismatch', {
+          target_kind: 'pairing_code',
+          metadata: {
+            expected_hw_prefix: String(row.hardware_id).slice(0, 16),
+            got_hw_prefix: hardware_id.slice(0, 16),
+          },
+        });
         res.status(401).json({ error: 'hardware id mismatch' });
         return;
       }

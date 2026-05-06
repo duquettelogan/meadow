@@ -1,0 +1,21 @@
+/**
+ * Hardware reset button watcher — DEFERRED.
+ *
+ * The v1 plan calls for a long-press reset that wipes /etc/meadow/state.json
+ * and restarts meadow-bootstrap so the box re-pairs. This is gated on
+ * Dane's enclosure design landing (button GPIO pin, debounce timing,
+ * indicator LED, etc.). Don't implement until the hardware is finalized.
+ *
+ * Sketch (when ready):
+ *   - Use `onoff` or `pigpio` to watch a GPIO pin for falling edge.
+ *   - Require ~5s hold to avoid accidental resets.
+ *   - On hold completion: fs.unlinkSync('/etc/meadow/state.json') then
+ *     either child_process.execFileSync('systemctl', ['restart', 'meadow-bootstrap'])
+ *     or set a sentinel flag and exit non-zero so systemd restarts us.
+ *   - Optionally drive an LED so the operator sees the reset took effect.
+ *
+ * Until hardware lands, manual reset works:
+ *   sudo rm /etc/meadow/state.json && sudo systemctl restart meadow-bootstrap
+ *
+ * Renamed with `.todo` extension so ts-node + tsc ignore it.
+ */

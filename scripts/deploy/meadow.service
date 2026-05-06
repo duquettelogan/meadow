@@ -1,9 +1,16 @@
 [Unit]
 Description=Meadow — kid-safe network filtering
 Documentation=https://github.com/duquettelogan/meadow
-After=network-online.target postgresql.service redis-server.service
-Wants=network-online.target
-Requires=postgresql.service redis-server.service
+# time-sync.target: the Pi has no RTC. Booting before NTP has settled
+# leaves the clock at epoch, which breaks HTTPS cert validation against
+# upstream feeds and the API. Wait for time to come in before starting.
+After=network-online.target time-sync.target meadow-bootstrap.service postgresql.service redis-server.service
+Wants=network-online.target time-sync.target
+# meadow-bootstrap is a Type=oneshot that pairs the box and writes
+# /etc/meadow/state.json. We require it so the DNS path only starts
+# once a device_id exists (otherwise blocks would have no child to
+# attribute to).
+Requires=meadow-bootstrap.service postgresql.service redis-server.service
 
 [Service]
 Type=simple

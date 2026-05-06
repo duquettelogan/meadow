@@ -50,12 +50,20 @@ export const defaultLimiter = makeLimiter({
   message: { error: 'rate limit exceeded' },
 });
 
-// Pairing claim is strict — 6-digit code = 1M combinations, brute-force
-// is feasible without rate limits. 10 attempts per 15 min per IP.
+// Pairing claim — even though we widened the code to 8 digits (100M
+// space), keep the strict limit. Defense in depth.
 export const pairingClaimLimiter = makeLimiter({
   windowMs: 15 * 60 * 1000,
   limit: 10,
   message: { error: 'too many pairing attempts, try again later' },
+});
+
+// Password reset (forgot + reset endpoints): 5 per IP per hour. Stops
+// reset-spam without making legitimate "I forgot, send another" hard.
+export const passwordResetLimiter = makeLimiter({
+  windowMs: 60 * 60 * 1000,
+  limit: 5,
+  message: { error: 'too many password reset requests, try again later' },
 });
 
 // Pairing start and poll are device-side — these are forgiving, just

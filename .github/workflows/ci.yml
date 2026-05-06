@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Lint, typecheck, test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: meadow
+          POSTGRES_PASSWORD: meadowdev
+          POSTGRES_DB: meadow_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U meadow"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://meadow:meadowdev@localhost:5432/meadow_test
+      REDIS_URL: redis://localhost:6379
+      # Throwaway test secrets — these never see production. tests/setup.ts
+      # has matching defaults if you skip setting them.
+      JWT_SECRET: '0000000000000000000000000000000000000000000000000000000000000000'
+      API_KEY_HMAC_SECRET: '1111111111111111111111111111111111111111111111111111111111111111'
+      DNS_PORT: '0'
+      DISABLE_RATE_LIMITS: '1'
+      DISABLE_SCHEDULER: '1'
+      DISABLE_HEARTBEAT: '1'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Run migrations against test DB
+        run: |
+          npx ts-node src/db/migrate.ts
+          npx ts-node src/db/migrate-002.ts
+          npx ts-node src/db/migrate-003.ts
+          npx ts-node src/db/migrate-004.ts
+          npx ts-node src/db/migrate-005.ts
+          npx ts-node src/db/migrate-006.ts
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build (tsc)
+        run: npx tsc
+
+      - name: npm audit (high+ severity)
+        run: npm audit --omit=dev --audit-level=high

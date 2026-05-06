@@ -31,6 +31,11 @@ process.env.DISABLE_RATE_LIMITS = '1';
 // Don't bind UDP/53 in tests.
 process.env.DNS_PORT = '0';
 
+// Heartbeat is opt-out in tests — even though `app` imports don't start it
+// (it's wired in src/index.ts main()), this is defense in depth in case a
+// test accidentally imports index.ts later.
+process.env.DISABLE_HEARTBEAT = '1';
+
 // Close the connection pool after all tests so the process can exit.
 afterAll(async () => {
   try {

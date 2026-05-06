@@ -1,6 +1,7 @@
 import dgram from 'dgram';
 import { handleDnsQuery } from './handler';
 import { loadBoxContext, getBoxContext } from '../box/context';
+import { getPolicyForChild } from '../policies/loader';
 
 /**
  * UDP DNS server.
@@ -17,10 +18,14 @@ import { loadBoxContext, getBoxContext } from '../box/context';
  * Set DNS_PORT=0 to disable the UDP server entirely (e.g. in tests).
  *
  * On startup, this loads the box's pairing context once and caches the
- * resolved child_profile_id. Every blocked query attributes its counter
- * increment to that child. If the box isn't paired yet, blocks still
- * happen but no counters are written (blocked traffic is still safe —
- * we just won't surface it on the dashboard until pairing completes).
+ * resolved child_profile_id. On every query it fetches the per-child
+ * filter policy via the policies loader (which has its own 60s TTL
+ * cache, so dashboard toggles propagate within a minute).
+ *
+ * If the box isn't paired yet, blocks still happen (categorized
+ * blocklist + crisis floor) but no counters are written and no
+ * per-child policy applies — blocked traffic is still safe; we just
+ * won't surface it on the dashboard until pairing completes.
  */
 
 const DNS_PORT = parseInt(process.env.DNS_PORT ?? '53', 10);
@@ -57,8 +62,15 @@ export async function startDnsServer(): Promise<void> {
     sock.on('message', async (msg, rinfo) => {
       try {
         const ctx = getBoxContext();
+        const policy = ctx?.child_profile_id
+          ? await getPolicyForChild(ctx.child_profile_id).catch((err) => {
+              console.error('[dns] policy load failed:', err);
+              return null;
+            })
+          : null;
         const response = await handleDnsQuery(msg, {
           childProfileId: ctx?.child_profile_id ?? null,
+          policy,
         });
         sock.send(new Uint8Array(response), rinfo.port, rinfo.address, (err) => {
           if (err) {

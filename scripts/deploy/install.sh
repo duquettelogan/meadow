@@ -185,12 +185,11 @@ fi
 
 step "Running database migrations"
 cd "$INSTALL_DIR"
-sudo -u "$SYSTEM_USER" --preserve-env=PATH \
-  bash -c "set -a; source $ENV_FILE; set +a; npx ts-node src/db/migrate.ts" \
-  >/dev/null
-sudo -u "$SYSTEM_USER" --preserve-env=PATH \
-  bash -c "set -a; source $ENV_FILE; set +a; npx ts-node src/db/migrate-003.ts" \
-  >/dev/null
+for m in migrate.ts migrate-002.ts migrate-003.ts migrate-004.ts migrate-005.ts migrate-006.ts; do
+  sudo -u "$SYSTEM_USER" --preserve-env=PATH \
+    bash -c "set -a; source $ENV_FILE; set +a; npx ts-node src/db/$m" \
+    >/dev/null
+done
 ok "migrations applied"
 
 step "Installing systemd service"

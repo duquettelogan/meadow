@@ -1,11 +1,12 @@
 [Unit]
 Description=Meadow Box Bootstrap (pairing)
 Documentation=https://github.com/duquettelogan/meadow
-After=network-online.target
-Wants=network-online.target
-# meadow.service should declare:  Requires=meadow-bootstrap.service
-# and:                            After=meadow-bootstrap.service
-# so the DNS server only starts once a device_id exists.
+# Need network AND time sync — the pairing API uses HTTPS, and a wrong
+# clock breaks cert validation. Pi has no RTC so this matters every boot.
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
+# meadow.service Requires + After this unit so the DNS server only
+# starts once /etc/meadow/state.json has a device_id.
 
 [Service]
 Type=oneshot

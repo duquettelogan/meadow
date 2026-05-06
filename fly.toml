@@ -1,0 +1,48 @@
+# Fly.io app config for the Meadow API.
+#
+# This deploys the API only — Postgres and Redis are managed services
+# attached separately (see scripts/deploy/PRODUCTION.md). The home box
+# (Pi) talks to this app over HTTPS at api.meadow.dqsec.com.
+#
+# Update `app` below after running `fly launch --no-deploy` to pick a
+# unique name (Fly will suggest one if it's taken).
+
+app = "meadow-api"
+primary_region = "ord"
+kill_signal = "SIGTERM"
+kill_timeout = 30
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "3000"
+  NODE_ENV = "production"
+  DNS_PORT = "0"
+  # ALLOWED_ORIGINS, DATABASE_URL, REDIS_URL, JWT_SECRET, API_KEY_HMAC_SECRET
+  # are set via `fly secrets set` — never commit them.
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 200
+    hard_limit = 400
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/health"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 512

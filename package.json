@@ -4,11 +4,15 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration",
-    "test:setup": "createdb -U meadow meadow_test 2>/dev/null; DATABASE_URL=postgres://meadow:meadowdev@localhost:5432/meadow_test npx ts-node src/db/migrate.ts && DATABASE_URL=postgres://meadow:meadowdev@localhost:5432/meadow_test npx ts-node src/db/migrate-003.ts"
+    "test:setup": "createdb -U meadow meadow_test 2>/dev/null; DATABASE_URL=postgres://meadow:meadowdev@localhost:5432/meadow_test npx ts-node src/db/migrate.ts && DATABASE_URL=postgres://meadow:meadowdev@localhost:5432/meadow_test npx ts-node src/db/migrate-002.ts && DATABASE_URL=postgres://meadow:meadowdev@localhost:5432/meadow_test npx ts-node src/db/migrate-003.ts && DATABASE_URL=postgres://meadow:meadowdev@localhost:5432/meadow_test npx ts-node src/db/migrate-004.ts && DATABASE_URL=postgres://meadow:meadowdev@localhost:5432/meadow_test npx ts-node src/db/migrate-005.ts && DATABASE_URL=postgres://meadow:meadowdev@localhost:5432/meadow_test npx ts-node src/db/migrate-006.ts"
   },
   "keywords": [],
   "author": "",

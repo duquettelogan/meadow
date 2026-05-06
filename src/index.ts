@@ -3,6 +3,7 @@ import { connectCache } from './cache/index';
 import { loadBlocklist } from './cache/blocklist';
 import { startScheduler, stopScheduler } from './intel/updater';
 import { startDnsServer, stopDnsServer } from './dns/udp-server';
+import { startHeartbeat, stopHeartbeat } from './box/heartbeat';
 import { app } from './api/server';
 
 const PORT = process.env.PORT || 3000;
@@ -30,6 +31,10 @@ async function main() {
     console.error('[dns] continuing without UDP DNS — API still functional.');
   }
 
+  // Start the box-side heartbeat after DNS is up. No-op if state.json
+  // doesn't exist (i.e. running as the API server, not a paired box).
+  startHeartbeat();
+
   const server = app.listen(PORT, () => {
     console.log(`Meadow API running on http://localhost:${PORT}`);
   });
@@ -37,6 +42,7 @@ async function main() {
   const shutdown = async (signal: string) => {
     console.log(`\n[${signal}] shutting down...`);
     stopScheduler();
+    stopHeartbeat();
     await stopDnsServer().catch(() => {});
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(1), 5000).unref();

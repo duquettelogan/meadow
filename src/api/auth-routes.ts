@@ -1,20 +1,53 @@
 import express, { Request, Response } from 'express';
+import crypto from 'crypto';
 import { db } from '../db/connection';
 import {
   hashPassword,
   verifyPassword,
 } from '../auth/passwords';
-import { signParentToken } from '../auth/jwt';
+import {
+  signParentToken,
+  verifyParentToken,
+  remainingTtlSeconds,
+} from '../auth/jwt';
+import { revokeJti, revokeAllForParent } from '../auth/revocation';
 import { generateApiKey } from '../auth/keys';
 import { requireParentAuth } from '../auth/middleware';
 import { validateBody } from './middleware';
-import { SignupBody, LoginBody } from './validation';
-import { loginLimiter, signupLimiter } from './rate-limits';
+import {
+  SignupBody,
+  LoginBody,
+  VerifyEmailBody,
+  ForgotPasswordBody,
+  ResetPasswordBody,
+  ChangePasswordBody,
+} from './validation';
+import {
+  loginLimiter,
+  signupLimiter,
+  passwordResetLimiter,
+} from './rate-limits';
+import { audit } from '../audit/log';
+import {
+  sendVerificationEmail,
+  sendPasswordResetEmail,
+} from '../email';
 
 const router = express.Router();
 
+const VERIFICATION_TTL_HOURS = 24;
+const RESET_TTL_HOURS = 1;
+
+function newToken(): string {
+  // 32 bytes → 43 base64url chars. Plenty of entropy, URL-safe, no padding.
+  return crypto.randomBytes(32).toString('base64url');
+}
+
 /**
  * Signup: creates a family and the first parent, returns a JWT.
+ * Also issues an email-verification token and best-effort sends the
+ * verification email. Account is usable immediately — verification
+ * gates future production-only features (e.g. shipping a hardware box).
  */
 router.post(
   '/signup',
@@ -23,6 +56,7 @@ router.post(
   async (req: Request, res: Response) => {
     const { email, password } = req.body as { email: string; password: string };
 
+    const verificationToken = newToken();
     const client = await db.connect();
     try {
       await client.query('BEGIN');
@@ -35,10 +69,13 @@ router.post(
 
       const passwordHash = await hashPassword(password);
       const parentResult = await client.query(
-        `INSERT INTO parents (family_id, email, password_hash)
-         VALUES ($1, $2, $3)
+        `INSERT INTO parents
+           (family_id, email, password_hash,
+            email_verification_token, email_verification_expires_at)
+         VALUES ($1, $2, $3, $4,
+                 NOW() + INTERVAL '${VERIFICATION_TTL_HOURS} hours')
          RETURNING id, family_id, email, created_at`,
-        [family.id, email, passwordHash]
+        [family.id, email, passwordHash, verificationToken]
       );
       const parent = parentResult.rows[0];
 
@@ -47,6 +84,15 @@ router.post(
       const token = signParentToken({
         parent_id: parent.id,
         family_id: parent.family_id,
+      });
+
+      // Best-effort email send. Provider failures are logged inside the
+      // helper — they never break the signup response.
+      sendVerificationEmail(email, verificationToken).catch(() => {});
+
+      audit(req, 'parent.signup', {
+        family_id: family.id,
+        parent_id: parent.id,
       });
 
       res.status(201).json({
@@ -99,6 +145,9 @@ router.post(
       );
 
       if (!row || !ok) {
+        audit(req, 'parent.login.failed', {
+          metadata: { email_attempted: email.slice(0, 64) },
+        });
         res.status(401).json({ error: 'invalid credentials' });
         return;
       }
@@ -110,6 +159,11 @@ router.post(
       const token = signParentToken({
         parent_id: row.id,
         family_id: row.family_id,
+      });
+
+      audit(req, 'parent.login', {
+        family_id: row.family_id,
+        parent_id: row.id,
       });
 
       res.json({
@@ -124,12 +178,31 @@ router.post(
 );
 
 /**
+ * Logout — revokes just this token (jti). Other devices still work.
+ */
+router.post('/logout', requireParentAuth, async (req: Request, res: Response) => {
+  try {
+    const claims = req.parent!;
+    if (claims.jti) {
+      await revokeJti(claims.jti, remainingTtlSeconds(claims));
+    }
+    audit(req, 'parent.logout');
+    res.json({ success: true });
+  } catch (err) {
+    console.error('logout failed:', err);
+    res.status(500).json({ error: 'internal server error' });
+  }
+});
+
+/**
  * /me — returns the current parent's identity.
  */
 router.get('/me', requireParentAuth, async (req: Request, res: Response) => {
   try {
     const result = await db.query(
-      'SELECT id, family_id, email, created_at, last_login_at FROM parents WHERE id = $1',
+      `SELECT id, family_id, email, created_at, last_login_at,
+              email_verified_at
+       FROM parents WHERE id = $1`,
       [req.parent!.parent_id]
     );
     if (result.rows.length === 0) {
@@ -142,6 +215,170 @@ router.get('/me', requireParentAuth, async (req: Request, res: Response) => {
     res.status(500).json({ error: 'internal server error' });
   }
 });
+
+/**
+ * Verify email — claims a verification token. Idempotent: claiming an
+ * already-verified token is a no-op success (so a parent reloading the
+ * verify page doesn't see a confusing error).
+ */
+router.post(
+  '/verify-email',
+  validateBody(VerifyEmailBody),
+  async (req: Request, res: Response) => {
+    const { token } = req.body as { token: string };
+    try {
+      const result = await db.query(
+        `UPDATE parents
+         SET email_verified_at = COALESCE(email_verified_at, NOW()),
+             email_verification_token = NULL,
+             email_verification_expires_at = NULL
+         WHERE email_verification_token = $1
+           AND email_verification_expires_at > NOW()
+         RETURNING id, family_id`,
+        [token],
+      );
+      if (result.rows.length === 0) {
+        res.status(400).json({ error: 'invalid or expired token' });
+        return;
+      }
+      audit(req, 'parent.email.verified', {
+        family_id: result.rows[0].family_id,
+        parent_id: result.rows[0].id,
+      });
+      res.json({ success: true });
+    } catch (err) {
+      console.error('verify-email failed:', err);
+      res.status(500).json({ error: 'internal server error' });
+    }
+  },
+);
+
+/**
+ * Forgot password — accepts an email, issues a reset token, sends an
+ * email. Always returns success even for unknown emails so this endpoint
+ * can't be used to enumerate accounts.
+ */
+router.post(
+  '/forgot-password',
+  passwordResetLimiter,
+  validateBody(ForgotPasswordBody),
+  async (req: Request, res: Response) => {
+    const { email } = req.body as { email: string };
+    try {
+      const lookup = await db.query(
+        'SELECT id, family_id FROM parents WHERE email = $1',
+        [email],
+      );
+      if (lookup.rows.length > 0) {
+        const token = newToken();
+        await db.query(
+          `UPDATE parents
+           SET password_reset_token = $1,
+               password_reset_expires_at = NOW() + INTERVAL '${RESET_TTL_HOURS} hours'
+           WHERE id = $2`,
+          [token, lookup.rows[0].id],
+        );
+        sendPasswordResetEmail(email, token).catch(() => {});
+        audit(req, 'parent.password.reset.requested', {
+          family_id: lookup.rows[0].family_id,
+          parent_id: lookup.rows[0].id,
+        });
+      }
+      // Same response either way — no enumeration.
+      res.json({ success: true });
+    } catch (err) {
+      console.error('forgot-password failed:', err);
+      res.status(500).json({ error: 'internal server error' });
+    }
+  },
+);
+
+/**
+ * Reset password — claims a reset token, sets a new password, revokes
+ * every outstanding session for that parent (forces re-login everywhere).
+ */
+router.post(
+  '/reset-password',
+  passwordResetLimiter,
+  validateBody(ResetPasswordBody),
+  async (req: Request, res: Response) => {
+    const { token, password } = req.body as { token: string; password: string };
+    try {
+      const lookup = await db.query(
+        `SELECT id, family_id FROM parents
+         WHERE password_reset_token = $1
+           AND password_reset_expires_at > NOW()`,
+        [token],
+      );
+      if (lookup.rows.length === 0) {
+        res.status(400).json({ error: 'invalid or expired token' });
+        return;
+      }
+      const parentId = lookup.rows[0].id;
+      const newHash = await hashPassword(password);
+      await db.query(
+        `UPDATE parents
+         SET password_hash = $1,
+             password_reset_token = NULL,
+             password_reset_expires_at = NULL
+         WHERE id = $2`,
+        [newHash, parentId],
+      );
+      await revokeAllForParent(parentId);
+      audit(req, 'parent.password.reset.completed', {
+        family_id: lookup.rows[0].family_id,
+        parent_id: parentId,
+      });
+      res.json({ success: true });
+    } catch (err) {
+      console.error('reset-password failed:', err);
+      res.status(500).json({ error: 'internal server error' });
+    }
+  },
+);
+
+/**
+ * Change password — authenticated. Requires the current password to
+ * prove the session-holder is the actual account owner. Revokes all
+ * other sessions on success (this one keeps working until next request).
+ */
+router.post(
+  '/change-password',
+  requireParentAuth,
+  validateBody(ChangePasswordBody),
+  async (req: Request, res: Response) => {
+    const { current_password, new_password } = req.body as {
+      current_password: string;
+      new_password: string;
+    };
+    try {
+      const lookup = await db.query(
+        'SELECT password_hash FROM parents WHERE id = $1',
+        [req.parent!.parent_id],
+      );
+      if (lookup.rows.length === 0) {
+        res.status(404).json({ error: 'parent not found' });
+        return;
+      }
+      const ok = await verifyPassword(current_password, lookup.rows[0].password_hash);
+      if (!ok) {
+        res.status(401).json({ error: 'current password incorrect' });
+        return;
+      }
+      const newHash = await hashPassword(new_password);
+      await db.query(
+        'UPDATE parents SET password_hash = $1 WHERE id = $2',
+        [newHash, req.parent!.parent_id],
+      );
+      await revokeAllForParent(req.parent!.parent_id);
+      audit(req, 'parent.password.changed');
+      res.json({ success: true });
+    } catch (err) {
+      console.error('change-password failed:', err);
+      res.status(500).json({ error: 'internal server error' });
+    }
+  },
+);
 
 /**
  * Generate a new API key for a device. Returns the plaintext key once.
@@ -168,6 +405,12 @@ router.post(
          VALUES ($1, $2, $3)`,
         [deviceId, key.prefix, key.hash]
       );
+
+      audit(req, 'device.key.issued', {
+        device_id: deviceId,
+        target_kind: 'device',
+        target_id: deviceId,
+      });
 
       res.status(201).json({
         key: key.plaintext,
@@ -206,6 +449,11 @@ router.delete(
         'UPDATE api_keys SET revoked_at = NOW() WHERE id = $1',
         [keyId]
       );
+      audit(req, 'device.key.revoked', {
+        device_id: deviceId,
+        target_kind: 'api_key',
+        target_id: keyId,
+      });
       res.json({ success: true });
     } catch (err) {
       console.error('key revocation failed:', err);

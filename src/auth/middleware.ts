@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { verifyParentToken, ParentClaims } from './jwt';
+import { verifyParentTokenAsync, ParentClaims } from './jwt';
 import { hashApiKey, getKeyPrefix, safeEqual } from './keys';
 import { db } from '../db/connection';
 
@@ -18,19 +18,19 @@ function extractBearer(req: Request): string | null {
 }
 
 /**
- * Requires a valid parent JWT. Attaches req.parent.
+ * Requires a valid (and non-revoked) parent JWT. Attaches req.parent.
  */
-export function requireParentAuth(
+export async function requireParentAuth(
   req: Request,
   res: Response,
-  next: NextFunction
-): void {
+  next: NextFunction,
+): Promise<void> {
   const token = extractBearer(req);
   if (!token) {
     res.status(401).json({ error: 'missing authorization' });
     return;
   }
-  const claims = verifyParentToken(token);
+  const claims = await verifyParentTokenAsync(token);
   if (!claims) {
     res.status(401).json({ error: 'invalid or expired token' });
     return;
@@ -44,15 +44,24 @@ export function requireParentAuth(
  * Use on routes like /api/v1/families/:familyId/...
  */
 export function requireParentForFamily(paramName = 'familyId') {
-  return (req: Request, res: Response, next: NextFunction): void => {
-    requireParentAuth(req, res, () => {
-      const familyId = req.params[paramName];
-      if (!familyId || familyId !== req.parent?.family_id) {
-        res.status(403).json({ error: 'forbidden' });
-        return;
-      }
-      next();
-    });
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const token = extractBearer(req);
+    if (!token) {
+      res.status(401).json({ error: 'missing authorization' });
+      return;
+    }
+    const claims = await verifyParentTokenAsync(token);
+    if (!claims) {
+      res.status(401).json({ error: 'invalid or expired token' });
+      return;
+    }
+    const familyId = req.params[paramName];
+    if (!familyId || familyId !== claims.family_id) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    req.parent = claims;
+    next();
   };
 }
 
@@ -66,7 +75,7 @@ export function requireParentForChild(paramName = 'childId') {
       res.status(401).json({ error: 'missing authorization' });
       return;
     }
-    const claims = verifyParentToken(token);
+    const claims = await verifyParentTokenAsync(token);
     if (!claims) {
       res.status(401).json({ error: 'invalid or expired token' });
       return;
@@ -79,7 +88,7 @@ export function requireParentForChild(paramName = 'childId') {
     try {
       const result = await db.query(
         'SELECT family_id FROM child_profiles WHERE id = $1',
-        [childId]
+        [childId],
       );
       if (
         result.rows.length === 0 ||
@@ -105,7 +114,7 @@ export function requireParentForChild(paramName = 'childId') {
 export async function requireDeviceAuth(
   req: Request,
   res: Response,
-  next: NextFunction
+  next: NextFunction,
 ): Promise<void> {
   const token = extractBearer(req);
   if (!token || !token.startsWith('mk_')) {
@@ -122,7 +131,7 @@ export async function requireDeviceAuth(
        FROM api_keys k
        JOIN devices d ON d.id = k.device_id
        WHERE k.key_prefix = $1 AND k.revoked_at IS NULL`,
-      [prefix]
+      [prefix],
     );
 
     let matched: any = null;

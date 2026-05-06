@@ -1,0 +1,32 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    groups:
+      typescript-tooling:
+        patterns:
+          - "typescript"
+          - "ts-node"
+          - "@types/*"
+      test-tooling:
+        patterns:
+          - "vitest"
+          - "supertest"
+      runtime-deps:
+        patterns:
+          - "express"
+          - "express-rate-limit"
+          - "helmet"
+          - "cors"
+          - "pg"
+          - "redis"
+          - "zod"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

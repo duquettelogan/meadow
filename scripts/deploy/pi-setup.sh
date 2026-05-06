@@ -24,6 +24,37 @@ die()   { printf "  ${RED}✗ %s${RESET}\n" "$1" >&2; exit 1; }
 
 [ "$EUID" -eq 0 ] || die "must be run as root (use sudo)"
 
+step "Time sync (NTP)"
+# Pi has no RTC. Without NTP the clock is at epoch on boot and HTTPS to
+# the API + intel feeds fails cert validation. systemd-timesyncd ships
+# with all current Debian/Ubuntu/Pi OS releases; chrony is a fallback if
+# someone built a custom image without it.
+if systemctl list-unit-files | grep -q '^systemd-timesyncd\.service'; then
+  systemctl enable -q --now systemd-timesyncd
+  ok "systemd-timesyncd enabled"
+elif command -v chronyd >/dev/null 2>&1; then
+  systemctl enable -q --now chrony
+  ok "chrony enabled"
+else
+  apt-get install -y -qq systemd-timesyncd >/dev/null 2>&1 || apt-get install -y -qq chrony >/dev/null 2>&1
+  systemctl enable -q --now systemd-timesyncd 2>/dev/null || systemctl enable -q --now chrony
+  ok "installed and enabled time sync daemon"
+fi
+
+# Wait for time to settle. timedatectl reports "synchronized" once
+# the daemon has its first peer answer. 30s upper bound — if the box
+# can't reach NTP that long, something else is wrong upstream.
+for i in $(seq 1 30); do
+  if timedatectl show -p NTPSynchronized --value 2>/dev/null | grep -q yes; then
+    ok "system clock is synchronized"
+    break
+  fi
+  sleep 1
+  if [ "$i" = "30" ]; then
+    warn "time did not synchronize within 30s — services may still come up but check: timedatectl"
+  fi
+done
+
 step "Hostname"
 HOSTNAME="meadow"
 if [ "$(hostname)" != "$HOSTNAME" ]; then
@@ -89,6 +120,38 @@ ufw allow from 172.16.0.0/12 to any port 3000 comment 'Meadow API (LAN only)' >/
 ufw allow from 192.168.0.0/16 to any port 3000 comment 'Meadow API (LAN only)' >/dev/null
 ufw --force enable >/dev/null
 ok "firewall configured: SSH, DNS, API (LAN only)"
+
+step "Journald log rotation (SD card longevity)"
+# Without a cap, journald grows until the SD card fills, after which
+# everything writes-to-disk freezes (DB, Meadow state, the lot). 100MB is
+# plenty for several days of normal logs and trivially small on a 32GB+
+# card. Drop in a config snippet rather than editing the main file so
+# OS updates can ship a new default without our change blocking it.
+mkdir -p /etc/systemd/journald.conf.d
+cat > /etc/systemd/journald.conf.d/meadow-rotation.conf <<'EOF'
+[Journal]
+# Cap total persistent journal usage at 100MB.
+SystemMaxUse=100M
+# Keep at least 50MB free on the filesystem at all times.
+SystemKeepFree=50M
+# Don't write any single file larger than 25MB (so vacuum is granular).
+SystemMaxFileSize=25M
+EOF
+systemctl restart systemd-journald
+ok "journald capped at 100MB"
+
+step "Outbound feed connectivity"
+# Meadow's intel updater pulls these every 6h. They MUST be reachable
+# from the box; if not, blocklists go stale (existing data stays in
+# Redis — never empty, but no new threats).
+for host in raw.githubusercontent.com urlhaus.abuse.ch phishing.army; do
+  if curl -sI --max-time 5 "https://$host/" -o /dev/null; then
+    ok "$host reachable"
+  else
+    warn "$host NOT reachable from this box — intel feeds will fail to refresh"
+    warn "(check egress firewalls / DNS — Meadow's own /etc/resolv.conf points at 1.1.1.1)"
+  fi
+done
 
 step "Swap settings (SD card longevity)"
 if [ -f /etc/sysctl.conf ]; then
