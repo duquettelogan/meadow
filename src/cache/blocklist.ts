@@ -28,7 +28,6 @@ function key(category: string): string {
 function getClient() {
   const client = createClient({
     url: process.env.REDIS_URL,
-    database: 1,
   });
   client.on('error', (err) => console.error('Redis error:', err));
   return client;
