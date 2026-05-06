@@ -20,7 +20,7 @@ async function makeVerifiedFamily() {
   const email = uniqueEmail();
   const sig = await request(app)
     .post('/api/v1/auth/signup')
-    .send({ email, password: 'rhpw12345' });
+    .send({ email, password: 'rhpw12345abc' });
   expect(sig.status).toBe(201);
   await verifyEmailFor(email);
   return {
