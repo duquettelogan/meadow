@@ -88,7 +88,15 @@ export async function audit(
           target_kind, target_id, ip, user_agent, metadata)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)`,
       [
-        fields.family_id ?? req.parent?.family_id ?? null,
+        // Device-authenticated requests (heartbeat, /box/network-status,
+        // /devices/discovered, etc.) have req.parent unset — fall back
+        // to the box's family so audit rows stay family-scoped instead
+        // of leaking out as orphaned (family_id = NULL) entries that
+        // the dashboard's family-scoped queries silently miss.
+        fields.family_id ??
+          req.parent?.family_id ??
+          req.device?.family_id ??
+          null,
         fields.parent_id ?? req.parent?.parent_id ?? null,
         fields.device_id ?? req.device?.device_id ?? null,
         action,
