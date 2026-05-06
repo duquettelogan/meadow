@@ -114,14 +114,15 @@ app.get('/api/v1/families/me', requireParentAuth, async (req, res) => {
 });
 
 // ---------- Children ----------
-// Email-verification gate: creating new child profiles is one of the two
-// touchpoints that materially expand the account (the other is pairing
-// claim). Unverified parents get a 403 — the dashboard should surface
-// "verify your email first" UX and offer the /resend-verification button.
+// Adding a child profile is just metadata — name + tier — and doesn't
+// itself touch any sensitive surface. The email-verification gate
+// stays on POST /api/v1/pairing/claim (the truly sensitive action:
+// claiming a hardware box and binding it to the family). A parent
+// who hasn't verified their email yet can still set up child names
+// in the dashboard.
 app.post(
   '/api/v1/children',
   requireParentAuth,
-  requireVerifiedParent,
   validateBody(CreateChildBody),
   async (req, res) => {
     const { name, tier } = req.body as { name: string; tier?: string };
