@@ -151,6 +151,50 @@ export async function sendPasswordResetEmail(
   }
 }
 
+/**
+ * Notify a family that their Meadow box appears to have gone silent.
+ *
+ * Triggered by the offline-alert worker the first time a paired box
+ * has had no heartbeat in >24h. Sent at most once per silent stretch —
+ * the worker stamps offline_alert_sent_at and the heartbeat handler
+ * clears it on reconnect.
+ *
+ * Best-effort: errors are logged and swallowed so the worker can still
+ * stamp the row and move on.
+ */
+export async function sendBoxOfflineEmail(
+  to: string,
+  opts: { lastSeenIso?: string | null; baseUrl?: string } = {},
+): Promise<void> {
+  const url = `${opts.baseUrl ?? defaultBaseUrl()}/box-health`;
+  const lastSeen = opts.lastSeenIso
+    ? `Last seen: ${opts.lastSeenIso}`
+    : 'We have not received a heartbeat from your box recently.';
+  try {
+    await getEmailProvider().send({
+      to,
+      subject: 'Your Meadow box looks offline',
+      text: [
+        'Your Meadow box has not checked in for over 24 hours.',
+        '',
+        lastSeen,
+        '',
+        'Things to check:',
+        '  - power and Ethernet cable',
+        '  - your home router still hands out DHCP normally',
+        '  - the box is reachable on the LAN at meadow.local',
+        '',
+        `Box health panel: ${url}`,
+        '',
+        'You will not receive another email until the box reconnects',
+        'and goes silent again.',
+      ].join('\n'),
+    });
+  } catch (err) {
+    console.error('[email] box-offline send failed:', err);
+  }
+}
+
 function defaultBaseUrl(): string {
   return process.env.DASHBOARD_URL || 'https://meadow.dqsec.com';
 }

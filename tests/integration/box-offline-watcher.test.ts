@@ -1,0 +1,193 @@
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import request from 'supertest';
+import { app } from '../../src/api/server';
+import { db } from '../../src/db/connection';
+import { verifyEmailFor } from '../helpers';
+
+// Stub email adapter — count + capture calls so the test can assert
+// without going through the console provider's stdout side effect.
+const sentEmails: { to: string; subject: string }[] = [];
+vi.mock('../../src/email', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../../src/email')>();
+  return {
+    ...real,
+    sendBoxOfflineEmail: vi.fn(async (to: string) => {
+      sentEmails.push({ to, subject: 'Your Meadow box looks offline' });
+    }),
+    sendVerificationEmail: vi.fn(async () => {}),
+    sendPasswordResetEmail: vi.fn(async () => {}),
+  };
+});
+
+import { runOfflineAlertCheckOnce } from '../../src/workers/box-offline-watcher';
+
+let counter = 0;
+const uniqueEmail = () => `boxoff-${Date.now()}-${++counter}@example.com`;
+const uniqueHwId = () =>
+  `hw_${Date.now()}_${++counter}_${Math.random().toString(36).slice(2)}`;
+const uniquePairingCode = () =>
+  String(99_000_000 + Math.floor(Math.random() * 999_999))
+    .padStart(8, '0')
+    .replace(/(\d{4})(\d{4})/, '$1-$2');
+
+async function makeFamily() {
+  const email = uniqueEmail();
+  const sig = await request(app)
+    .post('/api/v1/auth/signup')
+    .send({ email, password: 'boxoffpw1234567' });
+  expect(sig.status).toBe(201);
+  await verifyEmailFor(email);
+  return {
+    email,
+    token: sig.body.token as string,
+    family_id: sig.body.parent.family_id as string,
+  };
+}
+
+/**
+ * Spin up a real paired box for a family and return its device_id and
+ * api_key. Walks the box-originated pairing flow end-to-end so the
+ * api_keys row gets created and the worker's "boxes only" filter is
+ * exercised against actual data, not mocks.
+ */
+async function pairBox(token: string): Promise<{
+  device_id: string;
+  api_key: string;
+}> {
+  const hardware_id = uniqueHwId();
+  const code = uniquePairingCode();
+  await request(app)
+    .post('/api/v1/pairing/register')
+    .send({ hardware_id, pairing_code: code, platform: 'router' });
+
+  const claim = await request(app)
+    .post('/api/v1/pairing/claim-by-code')
+    .set('Authorization', `Bearer ${token}`)
+    .send({ pairing_code: code });
+  expect(claim.status).toBe(200);
+
+  const status = await request(app).get(
+    `/api/v1/pairing/box-status/${hardware_id}`,
+  );
+  return {
+    device_id: status.body.device_id,
+    api_key: status.body.api_key,
+  };
+}
+
+beforeEach(() => {
+  sentEmails.length = 0;
+});
+
+describe('runOfflineAlertCheckOnce', () => {
+  it('emails the family + stamps offline_alert_sent_at when a box has been silent >24h', async () => {
+    const f = await makeFamily();
+    const box = await pairBox(f.token);
+
+    // Backdate last_seen to 26 hours ago.
+    await db.query(
+      `UPDATE devices SET last_seen = NOW() - INTERVAL '26 hours'
+       WHERE id = $1`,
+      [box.device_id],
+    );
+
+    const alerted = await runOfflineAlertCheckOnce();
+    expect(alerted).toBe(1);
+
+    expect(sentEmails).toHaveLength(1);
+    expect(sentEmails[0].to).toBe(f.email);
+
+    const row = await db.query(
+      'SELECT offline_alert_sent_at FROM devices WHERE id = $1',
+      [box.device_id],
+    );
+    expect(row.rows[0].offline_alert_sent_at).toBeTruthy();
+  });
+
+  it('does NOT re-email a box that has already been alerted', async () => {
+    const f = await makeFamily();
+    const box = await pairBox(f.token);
+    await db.query(
+      `UPDATE devices
+       SET last_seen = NOW() - INTERVAL '30 hours',
+           offline_alert_sent_at = NOW() - INTERVAL '2 hours'
+       WHERE id = $1`,
+      [box.device_id],
+    );
+
+    const alerted = await runOfflineAlertCheckOnce();
+    expect(alerted).toBe(0);
+    expect(sentEmails).toHaveLength(0);
+  });
+
+  it('skips non-box devices (no api_key)', async () => {
+    const f = await makeFamily();
+
+    // /devices/discovered creates a row with platform=discovered and no
+    // api_key — exactly the synthetic kind we want filtered out.
+    const child = await request(app)
+      .post('/api/v1/children')
+      .set('Authorization', `Bearer ${f.token}`)
+      .send({ name: 'Emma' });
+
+    const dev = await request(app)
+      .post('/api/v1/devices/register')
+      .set('Authorization', `Bearer ${f.token}`)
+      .send({
+        child_profile_id: child.body.id,
+        platform: 'ios',
+        device_token: `dt-noapikey-${Date.now()}-${counter}`,
+      });
+    expect(dev.status).toBe(201);
+
+    await db.query(
+      `UPDATE devices SET last_seen = NOW() - INTERVAL '40 hours'
+       WHERE id = $1`,
+      [dev.body.id],
+    );
+
+    const alerted = await runOfflineAlertCheckOnce();
+    expect(alerted).toBe(0);
+    expect(sentEmails).toHaveLength(0);
+  });
+
+  it('skips boxes that are still inside the 24h silent window', async () => {
+    const f = await makeFamily();
+    const box = await pairBox(f.token);
+    await db.query(
+      `UPDATE devices SET last_seen = NOW() - INTERVAL '6 hours'
+       WHERE id = $1`,
+      [box.device_id],
+    );
+
+    const alerted = await runOfflineAlertCheckOnce();
+    expect(alerted).toBe(0);
+    expect(sentEmails).toHaveLength(0);
+  });
+});
+
+describe('heartbeat clears offline_alert_sent_at on reconnect', () => {
+  it('flips offline_alert_sent_at back to NULL when the box checks in', async () => {
+    const f = await makeFamily();
+    const box = await pairBox(f.token);
+
+    // Mark the box as previously alerted.
+    await db.query(
+      `UPDATE devices SET offline_alert_sent_at = NOW() - INTERVAL '3 hours'
+       WHERE id = $1`,
+      [box.device_id],
+    );
+
+    const hb = await request(app)
+      .post('/api/v1/devices/heartbeat')
+      .set('Authorization', `Bearer ${box.api_key}`)
+      .send({ ts: Math.floor(Date.now() / 1000) });
+    expect(hb.status).toBe(204);
+
+    const row = await db.query(
+      'SELECT offline_alert_sent_at FROM devices WHERE id = $1',
+      [box.device_id],
+    );
+    expect(row.rows[0].offline_alert_sent_at).toBeNull();
+  });
+});
