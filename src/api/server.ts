@@ -911,6 +911,105 @@ app.get(
   }
 );
 
+// ---------- Family-scoped stats ----------
+//
+// GET /api/v1/stats/blocks?period=today|week|month
+//
+// Family-wide aggregate of block_counters, scoped to the authenticated
+// parent's family via the child_profiles.family_id JOIN.
+//
+// In the v1 household model the resolver attributes every block to the
+// family's synthetic Household child (see refactor/household-v1) — so
+// `by_child` will typically contain a single Household entry until v2
+// per-child resolution lands. Including it (rather than filtering it
+// out) keeps the response shape stable across the v1→v2 transition:
+// the dashboard can render whatever count(s) it gets.
+app.get('/api/v1/stats/blocks', requireParentAuth, async (req, res) => {
+  const period = (req.query.period ?? '').toString();
+  // Period → days-back for the lower bound. `today` is exactly today
+  // (one row max in by_day); week/month are the trailing 7/30 day
+  // windows including today.
+  const daysBack: Record<string, number> = {
+    today: 0,
+    week: 6,
+    month: 29,
+  };
+  if (!(period in daysBack)) {
+    res.status(400).json({
+      error: 'invalid period',
+      details: 'period must be one of: today, week, month',
+    });
+    return;
+  }
+  const days = daysBack[period];
+
+  try {
+    // Single CTE-driven query would be possible but four small focused
+    // queries are easier to read, easier to index against, and don't
+    // materially differ in cost on a counter table this size.
+    const familyId = req.parent!.family_id;
+    const dayLowerBound = `CURRENT_DATE - INTERVAL '${days} days'`;
+
+    const totalQ = db.query(
+      `SELECT COALESCE(SUM(b.count), 0)::int AS total
+       FROM block_counters b
+       JOIN child_profiles c ON c.id = b.child_profile_id
+       WHERE c.family_id = $1 AND b.day >= ${dayLowerBound}`,
+      [familyId],
+    );
+
+    const byCategoryQ = db.query(
+      `SELECT b.category, COALESCE(SUM(b.count), 0)::int AS count
+       FROM block_counters b
+       JOIN child_profiles c ON c.id = b.child_profile_id
+       WHERE c.family_id = $1 AND b.day >= ${dayLowerBound}
+       GROUP BY b.category
+       ORDER BY count DESC`,
+      [familyId],
+    );
+
+    const byDayQ = db.query(
+      `SELECT TO_CHAR(b.day, 'YYYY-MM-DD') AS date,
+              COALESCE(SUM(b.count), 0)::int AS count
+       FROM block_counters b
+       JOIN child_profiles c ON c.id = b.child_profile_id
+       WHERE c.family_id = $1 AND b.day >= ${dayLowerBound}
+       GROUP BY b.day
+       ORDER BY b.day ASC`,
+      [familyId],
+    );
+
+    const byChildQ = db.query(
+      `SELECT c.id AS child_id, c.name,
+              COALESCE(SUM(b.count), 0)::int AS count
+       FROM child_profiles c
+       JOIN block_counters b ON b.child_profile_id = c.id
+       WHERE c.family_id = $1 AND b.day >= ${dayLowerBound}
+       GROUP BY c.id, c.name
+       ORDER BY count DESC`,
+      [familyId],
+    );
+
+    const [totalR, byCategoryR, byDayR, byChildR] = await Promise.all([
+      totalQ,
+      byCategoryQ,
+      byDayQ,
+      byChildQ,
+    ]);
+
+    res.json({
+      period,
+      total_blocks: totalR.rows[0]?.total ?? 0,
+      by_category: byCategoryR.rows,
+      by_day: byDayR.rows,
+      by_child: byChildR.rows,
+    });
+  } catch (err) {
+    console.error('stats/blocks failed:', err);
+    res.status(500).json({ error: 'internal server error' });
+  }
+});
+
 // ---------- Resolver / DoH ----------
 app.post(
   '/api/v1/resolve',
