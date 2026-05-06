@@ -33,7 +33,7 @@ Redis outage falls open (we log + allow the token) rather than locking
 everyone out. This is a deliberate availability trade — the alternative
 (deny-on-error) makes a Redis blip into a global outage of dashboards.
 
-### 4.4 — Email verification + password recovery (scaffold)
+### 4.4 — Email verification + password recovery
 
 Schema, endpoints, and token plumbing are live:
 - `POST /api/v1/auth/verify-email`
@@ -45,11 +45,13 @@ Schema, endpoints, and token plumbing are live:
 Tokens are 32-byte base64url, time-limited (24h verify, 1h reset). Reset
 and change rotate the password and revoke all sessions for that parent.
 
-**Operator action required:** the email provider is currently a console
-adapter (logs the email body to stderr/journald). To actually send mail
-in production, drop a real adapter into `src/email/` and switch on
-`POSTMARK_TOKEN` / `RESEND_API_KEY` env in `getEmailProvider()`. The
-plumbing exists — the provider integration doesn't.
+**Resend adapter (`src/email/`) is wired.** Set `RESEND_API_KEY` in
+`fly secrets` to enable real delivery. From address defaults to
+`Meadow <hello@dqsec.com>` (override with `MEADOW_FROM_EMAIL`). When
+the env var is empty/unset, the provider falls back to a console
+logger so dev and tests still work without credentials. Bounded with
+a 10s AbortController timeout; non-2xx and network errors are logged
+and swallowed so a Resend outage never blocks signup or password reset.
 
 The flow does NOT enumerate accounts: `/forgot-password` returns 200
 even for unknown emails.
@@ -103,10 +105,9 @@ Status: scaffold-only for v1. Mandatory in v1.5 per the original plan.
 
 ## Operator follow-ups
 
-1. **Email provider** — pick Postmark or Resend; add the adapter; set
-   the env in `fly secrets`. Verification still works without it (token
-   sits in the DB, parent can be sent the link manually) but the user
-   experience is bad.
+1. **Resend account + DNS** — sign up at resend.com, add the dqsec.com
+   domain, verify the DNS records Resend provides, generate an API key,
+   `fly secrets set RESEND_API_KEY=re_...`. Adapter is already wired.
 2. **TOTP encryption key** — when 4.5 lands, it'll need a `TOTP_ENCRYPTION_KEY`
    secret to encrypt the seed before storing. Generate with `openssl rand -hex 32`.
 3. **Cloudflare in front of Fly** — flip the orange cloud once TLS is

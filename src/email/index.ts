@@ -5,19 +5,20 @@
  * reset. Both send a short message with a tokenized URL. Volume is tiny
  * (one or two emails per parent ever), so any provider works.
  *
- * The default adapter logs to console — fine for dev and tests, NOT
- * for production. Wire a real provider via env in production:
+ * Provider selection (in priority order):
+ *   - RESEND_API_KEY  → Resend HTTP API (production)
+ *   - none            → ConsoleEmailProvider (dev, tests, unconfigured prod)
  *
- *   POSTMARK_TOKEN=pm-...   # Postmark
- *   RESEND_API_KEY=re_...   # Resend
+ * Adding a new provider: implement EmailProvider, branch on the matching
+ * env var in chooseProvider().
  *
- * If no provider env is set in production, signup will succeed but
- * verification emails go to the API logs. Explicitly call out so a
- * deploy without email config doesn't silently break.
- *
- * Adding a real provider: add a new file in this directory exporting
- * an `EmailProvider` and switch on env in createProvider().
+ * Privacy posture: the email body contains a tokenized URL, never the
+ * password itself, never any blocked-domain or block-counter data.
  */
+
+const FROM_ADDRESS = process.env.MEADOW_FROM_EMAIL || 'Meadow <hello@dqsec.com>';
+const RESEND_ENDPOINT = 'https://api.resend.com/emails';
+const RESEND_TIMEOUT_MS = 10_000;
 
 export interface EmailMessage {
   to: string;
@@ -36,6 +37,7 @@ class ConsoleEmailProvider implements EmailProvider {
   }
   async send(msg: EmailMessage): Promise<void> {
     console.log('---- EMAIL ----');
+    console.log('From:   ', FROM_ADDRESS);
     console.log('To:     ', msg.to);
     console.log('Subject:', msg.subject);
     console.log(msg.text);
@@ -43,18 +45,70 @@ class ConsoleEmailProvider implements EmailProvider {
   }
 }
 
+class ResendEmailProvider implements EmailProvider {
+  constructor(private apiKey: string) {}
+
+  name(): string {
+    return 'resend';
+  }
+
+  async send(msg: EmailMessage): Promise<void> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), RESEND_TIMEOUT_MS);
+
+    try {
+      const res = await fetch(RESEND_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: FROM_ADDRESS,
+          to: msg.to,
+          subject: msg.subject,
+          text: msg.text,
+        }),
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        // Read the body for diagnostics but don't throw — caller swallows
+        // errors anyway; we just want a useful log line. Cap the read so a
+        // misbehaving provider can't dump megabytes into our logs.
+        let detail = '';
+        try {
+          detail = (await res.text()).slice(0, 500);
+        } catch {
+          // ignore body read failure
+        }
+        throw new Error(`Resend HTTP ${res.status}: ${detail}`);
+      }
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
 let cached: EmailProvider | null = null;
+
+function chooseProvider(): EmailProvider {
+  const resendKey = process.env.RESEND_API_KEY;
+  if (resendKey && resendKey.trim().length > 0) {
+    console.log('[email] using Resend provider');
+    return new ResendEmailProvider(resendKey.trim());
+  }
+  if (process.env.POSTMARK_TOKEN) {
+    console.warn(
+      '[email] POSTMARK_TOKEN set but no Postmark adapter — falling back to console',
+    );
+  }
+  return new ConsoleEmailProvider();
+}
 
 export function getEmailProvider(): EmailProvider {
   if (cached) return cached;
-  // Future: branch on POSTMARK_TOKEN / RESEND_API_KEY etc. and instantiate
-  // the matching adapter. For now, console only.
-  if (process.env.POSTMARK_TOKEN || process.env.RESEND_API_KEY) {
-    console.warn(
-      '[email] provider env detected but adapter not implemented yet — falling back to console',
-    );
-  }
-  cached = new ConsoleEmailProvider();
+  cached = chooseProvider();
   return cached;
 }
 

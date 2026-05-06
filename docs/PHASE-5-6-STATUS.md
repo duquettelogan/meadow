@@ -3,6 +3,15 @@
 These phases are not code work. They run in parallel with engineering,
 not after. Snapshot of what to do and the current status.
 
+## Engineering pre-reqs that landed for these phases
+
+- **Transactional email (DONE):** Resend adapter wired in `src/email/`.
+  Reads `RESEND_API_KEY` from env; falls back to console logging if
+  unset. From address `Meadow <hello@dqsec.com>` (override via
+  `MEADOW_FROM_EMAIL`). Used by signup verification and password reset
+  flows today; ready for VPC notifications, account-deletion confirms,
+  and any compliance comms the lawyer scopes out in 5.1 / 5.2.
+
 ## Phase 5 — Legal / Compliance
 
 ### 5.1 — Privacy lawyer (NOT STARTED)
