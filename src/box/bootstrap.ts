@@ -36,6 +36,8 @@ import * as crypto from 'crypto';
 import { generatePairingCode, isValidPairingCode } from './codegen';
 import { startPairingWeb, setStatus, stopPairingWeb } from './web';
 import { blinkBlue, solidGreen, off as ledOff } from './led';
+import { setupNetworkMode, retryNetworkSetup } from './network-mode';
+import { loadBoxContext } from './context';
 
 const API_URL = process.env.API_URL || 'http://localhost:3000';
 const BOX_ENV_FILE = process.env.BOX_ENV_FILE || '/etc/meadow/box.env';
@@ -247,7 +249,10 @@ async function main() {
     log(`pairing code: ${code}`);
 
     blinkBlue();
-    startPairingWeb(code);
+    // Pass the retry-network handler through so the meadow.local
+    // page's "Retry network setup" button has a hook into the
+    // box-side detect→configure code path.
+    startPairingWeb(code, retryNetworkSetup);
 
     try {
       code = await register(hardware_id, code);
@@ -261,8 +266,38 @@ async function main() {
       });
       log(`paired. device_id=${device_id}, credentials persisted.`);
 
+      // Load the box context so network-mode can call /box/network-status
+      // with the freshly issued api_key.
+      try {
+        await loadBoxContext();
+      } catch (ctxErr) {
+        err(`loadBoxContext after pairing failed: ${(ctxErr as Error).message}`);
+      }
+
+      // Run the DHCP-handoff network setup. This blocks until the 30s
+      // conflict check finishes. If a conflict is detected, dnsmasq is
+      // NOT started; the meadow.local page will surface the conflict
+      // UI. Either way we proceed to LED + post-pair hold so the
+      // operator sees something useful.
+      log('running network mode setup...');
+      try {
+        const outcome = await setupNetworkMode();
+        if (outcome.conflict_detected) {
+          err(
+            'DHCP conflict detected — leaving dnsmasq off; pairing page will surface retry UI',
+          );
+          setStatus('network_conflict');
+        } else {
+          log('network mode active');
+          setStatus('paired');
+        }
+      } catch (e) {
+        err(`network setup crashed: ${(e as Error).message}`);
+        setStatus('paired'); // pairing succeeded — surface that even
+                              // if network-mode flaked
+      }
+
       solidGreen();
-      setStatus('paired');
       // Hold so the parent sees the visual confirmation in person and
       // on the meadow.local page before the web server tears down.
       await sleep(POST_PAIR_HOLD_MS);

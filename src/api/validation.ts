@@ -147,6 +147,26 @@ export const AnalyzeBody = z
   })
   .strict();
 
+// ---------- Box network status ----------
+// Pushed by the box after each network-mode setup or retry. Used by
+// the dashboard to surface "DHCP active" / "conflict detected" /
+// lease counts in the Box Health panel.
+//
+// Loose-shape on purpose: the whole payload is stashed as JSONB so
+// extensions (lease list, gateway changes, dnsmasq error messages)
+// don't require a migration.
+export const BoxNetworkStatusBody = z
+  .object({
+    dhcp_active: z.boolean(),
+    conflict_detected: z.boolean(),
+    servers_seen: z.array(z.string().max(64)).max(20).optional(),
+    box_ip: z.string().max(64).optional().nullable(),
+    gateway_ip: z.string().max(64).optional().nullable(),
+    leases_count: z.number().int().nonnegative().optional(),
+    last_check_at: z.string().max(64).optional().nullable(),
+  })
+  .strict();
+
 // ---------- Heartbeat ----------
 // Box health snapshot. All fields optional so we can extend the contract
 // without breaking older boxes.

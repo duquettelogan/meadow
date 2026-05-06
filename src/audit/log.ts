@@ -46,7 +46,9 @@ export type AuditAction =
   | 'pairing.claimed'
   | 'pairing.poll.hardware_mismatch'
   // Box
-  | 'box.heartbeat';
+  | 'box.heartbeat'
+  | 'box.network.reported'
+  | 'box.network.conflict';
 
 export interface AuditFields {
   family_id?: string | null;
