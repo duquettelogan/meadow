@@ -12,7 +12,8 @@
     "test:watch": "vitest",
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration",
-    "test:setup": "createdb -U meadow meadow_test 2>/dev/null; DATABASE_URL=postgres://meadow:meadowdev@localhost:5432/meadow_test npx ts-node src/db/migrate.ts && DATABASE_URL=postgres://meadow:meadowdev@localhost:5432/meadow_test npx ts-node src/db/migrate-002.ts && DATABASE_URL=postgres://meadow:meadowdev@localhost:5432/meadow_test npx ts-node src/db/migrate-003.ts && DATABASE_URL=postgres://meadow:meadowdev@localhost:5432/meadow_test npx ts-node src/db/migrate-004.ts && DATABASE_URL=postgres://meadow:meadowdev@localhost:5432/meadow_test npx ts-node src/db/migrate-005.ts && DATABASE_URL=postgres://meadow:meadowdev@localhost:5432/meadow_test npx ts-node src/db/migrate-006.ts"
+    "migrate": "npx ts-node scripts/run-migrations.ts",
+    "test:setup": "createdb -U meadow meadow_test 2>/dev/null; DATABASE_URL=postgres://meadow:meadowdev@localhost:5432/meadow_test npx ts-node scripts/run-migrations.ts"
   },
   "keywords": [],
   "author": "",

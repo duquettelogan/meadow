@@ -64,13 +64,7 @@ jobs:
         run: npx tsc --noEmit
 
       - name: Run migrations against test DB
-        run: |
-          npx ts-node src/db/migrate.ts
-          npx ts-node src/db/migrate-002.ts
-          npx ts-node src/db/migrate-003.ts
-          npx ts-node src/db/migrate-004.ts
-          npx ts-node src/db/migrate-005.ts
-          npx ts-node src/db/migrate-006.ts
+        run: npx ts-node scripts/run-migrations.ts
 
       - name: Run tests
         run: npm test
