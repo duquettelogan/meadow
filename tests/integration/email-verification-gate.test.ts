@@ -8,6 +8,10 @@ let counter = 0;
 const uniqueEmail = () => `verifgate-${Date.now()}-${++counter}@example.com`;
 const uniqueHwId = () =>
   `hw_${Date.now()}_${++counter}_${Math.random().toString(36).slice(2)}`;
+const uniquePairingCodeForTest = () =>
+  String(99_000_000 + Math.floor(Math.random() * 999_999))
+    .padStart(8, '0')
+    .replace(/(\d{4})(\d{4})/, '$1-$2');
 
 async function signup(email: string) {
   return request(app)
@@ -28,7 +32,7 @@ describe('email-verification gate', () => {
 
       // Hot patch fix/unblock-children-without-email-verify: adding
       // a kid's name is just metadata. The gate stays on
-      // /pairing/claim (the truly sensitive action — binding a
+      // /pairing/claim* (the truly sensitive action — binding a
       // physical box to the family).
       expect(r.status).toBe(201);
       expect(r.body.name).toBe('UngatedKid');
@@ -57,11 +61,6 @@ describe('email-verification gate', () => {
 
   describe('POST /api/v1/pairing/claim — STILL gated', () => {
     it('returns 403 email_not_verified for unverified parent', async () => {
-      // Build a parent + child + pairing code as a verified parent,
-      // then roll back the verification so we hit the gate at claim
-      // time. /children is now ungated so we can create the child
-      // either before or after un-verifying — doing it after to
-      // double-check that side stays open.
       const email = uniqueEmail();
       const sig = await signup(email);
 
@@ -106,6 +105,45 @@ describe('email-verification gate', () => {
         .post('/api/v1/pairing/claim')
         .set('Authorization', `Bearer ${sig.body.token}`)
         .send({ code: start.body.code, child_profile_id: child.body.id });
+
+      expect(claim.status).toBe(200);
+    });
+  });
+
+  describe('POST /api/v1/pairing/claim-by-code — STILL gated', () => {
+    it('returns 403 email_not_verified for unverified parent', async () => {
+      const email = uniqueEmail();
+      const sig = await signup(email);
+
+      // Box pre-registers a code (anonymous, doesn't go through the gate).
+      const code = uniquePairingCodeForTest();
+      await request(app)
+        .post('/api/v1/pairing/register')
+        .send({ hardware_id: uniqueHwId(), pairing_code: code });
+
+      const claim = await request(app)
+        .post('/api/v1/pairing/claim-by-code')
+        .set('Authorization', `Bearer ${sig.body.token}`)
+        .send({ pairing_code: code });
+
+      expect(claim.status).toBe(403);
+      expect(claim.body).toEqual({ error: 'email_not_verified' });
+    });
+
+    it('returns 200 for verified parent claiming a registered code', async () => {
+      const email = uniqueEmail();
+      const sig = await signup(email);
+      await verifyEmailFor(email);
+
+      const code = uniquePairingCodeForTest();
+      await request(app)
+        .post('/api/v1/pairing/register')
+        .send({ hardware_id: uniqueHwId(), pairing_code: code });
+
+      const claim = await request(app)
+        .post('/api/v1/pairing/claim-by-code')
+        .set('Authorization', `Bearer ${sig.body.token}`)
+        .send({ pairing_code: code });
 
       expect(claim.status).toBe(200);
     });

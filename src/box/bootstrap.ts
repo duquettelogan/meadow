@@ -1,37 +1,56 @@
 /**
- * Meadow box bootstrap.
+ * Meadow box bootstrap — box-originated pairing flow.
  *
  * Runs once at boot via systemd (Type=oneshot, RemainAfterExit=yes).
- * If the box has never paired, it generates a hardware id, requests a
- * pairing code from the API, prints the code to stdout (captured by
- * journald) and polls until a parent claims it. Once paired, the API
- * key + device_id are persisted to /etc/meadow/state.json (mode 0600).
+ * Replaces the v0 server-generated-code flow.
  *
- * The main meadow.service depends on this unit so the DNS server only
- * starts once a device_id is known.
+ * Flow:
+ *   1. If /etc/meadow/box.env already has MEADOW_API_KEY, we're paired.
+ *      Exit 0 immediately so meadow.service starts.
+ *   2. Generate (or re-use) a pairing code stored in
+ *      /var/lib/meadow/pairing-code. Box-originated: code lives on
+ *      disk so it survives reboots before the parent claims it.
+ *   3. Register with the API: POST /api/v1/pairing/register {hardware_id, pairing_code}.
+ *      On 409 (code collision with another unclaimed box), regenerate
+ *      and retry.
+ *   4. Start the LAN-facing pairing web page on http://meadow.local
+ *      and the blink-blue LED state.
+ *   5. Poll GET /api/v1/pairing/box-status/:hardware_id every 10s.
+ *      On status=ready, write the API key to /etc/meadow/box.env, flip
+ *      LED to solid green, switch the web page to success, sleep 30s
+ *      so the operator can confirm visually, then exit 0.
  *
  * Env:
- *   API_URL      base URL of the meadow API (default http://localhost:3000)
- *   STATE_FILE   override state file path (default /etc/meadow/state.json)
- *   PLATFORM     reported platform string (default 'meadow-box')
+ *   API_URL          base URL of the Meadow API (default localhost:3000)
+ *   BOX_ENV_FILE     override box.env path (default /etc/meadow/box.env)
+ *   PAIRING_CODE_FILE override pairing-code path (default /var/lib/meadow/pairing-code)
+ *   PLATFORM         reported platform string (default 'meadow-box')
  *
- * Reset / re-pair:  rm /etc/meadow/state.json && systemctl restart meadow-bootstrap
+ * Reset / re-pair: rm /etc/meadow/box.env /var/lib/meadow/pairing-code
+ *                  && systemctl restart meadow-bootstrap
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import { generatePairingCode, isValidPairingCode } from './codegen';
+import { startPairingWeb, setStatus, stopPairingWeb } from './web';
+import { blinkBlue, solidGreen, off as ledOff } from './led';
 
 const API_URL = process.env.API_URL || 'http://localhost:3000';
-const STATE_FILE = process.env.STATE_FILE || '/etc/meadow/state.json';
+const BOX_ENV_FILE = process.env.BOX_ENV_FILE || '/etc/meadow/box.env';
+const PAIRING_CODE_FILE =
+  process.env.PAIRING_CODE_FILE || '/var/lib/meadow/pairing-code';
 const PLATFORM = process.env.PLATFORM || 'meadow-box';
 const MACHINE_ID_PATH = '/etc/machine-id';
-
-interface State {
-  hardware_id: string;
-  api_key?: string;
-  device_id?: string;
-}
+const POLL_INTERVAL_MS = parseInt(
+  process.env.POLL_INTERVAL_MS ?? '10000',
+  10,
+);
+const POST_PAIR_HOLD_MS = parseInt(
+  process.env.POST_PAIR_HOLD_MS ?? '30000',
+  10,
+);
 
 function log(msg: string) {
   console.log(`[bootstrap] ${msg}`);
@@ -41,17 +60,22 @@ function err(msg: string) {
   console.error(`[bootstrap] ${msg}`);
 }
 
+interface BoxEnv {
+  MEADOW_HARDWARE_ID?: string;
+  MEADOW_API_KEY?: string;
+  MEADOW_DEVICE_ID?: string;
+}
+
 /**
- * Derive a stable hardware id. Prefer /etc/machine-id (systemd, present on
- * every Pi OS / Debian / Ubuntu install, stable across reboots, not exposed
- * on the network). Fall back to a persisted random id for dev environments
- * that don't have machine-id readable.
+ * Derive a stable hardware id. Prefer /etc/machine-id (systemd, present
+ * on every Pi OS / Debian / Ubuntu install, stable across reboots, not
+ * exposed on the network — we hash it before sending). Fall back to a
+ * persisted random id if /etc/machine-id is unreadable.
  */
 function deriveHardwareId(): string {
   try {
     const raw = fs.readFileSync(MACHINE_ID_PATH, 'utf-8').trim();
     if (raw.length > 0) {
-      // Hash so we don't leak the literal machine-id over the wire.
       const h = crypto.createHash('sha256').update(raw).digest('hex').slice(0, 32);
       return `hw_${h}`;
     }
@@ -61,54 +85,76 @@ function deriveHardwareId(): string {
   return `hw_${crypto.randomBytes(16).toString('hex')}`;
 }
 
-function ensureStateDir() {
-  const dir = path.dirname(STATE_FILE);
+function ensureDir(filePath: string, mode = 0o700) {
+  const dir = path.dirname(filePath);
   if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(dir, { recursive: true, mode });
   }
 }
 
-function loadState(): State {
-  ensureStateDir();
-  if (fs.existsSync(STATE_FILE)) {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(STATE_FILE, 'utf-8'));
-      if (parsed && typeof parsed.hardware_id === 'string') {
-        return parsed;
-      }
-      err(`state file ${STATE_FILE} is malformed, regenerating`);
-    } catch (e) {
-      err(`failed to parse ${STATE_FILE}: ${(e as Error).message}, regenerating`);
+function readBoxEnv(): BoxEnv {
+  if (!fs.existsSync(BOX_ENV_FILE)) return {};
+  const out: BoxEnv = {};
+  for (const line of fs.readFileSync(BOX_ENV_FILE, 'utf-8').split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq < 0) continue;
+    const key = trimmed.slice(0, eq).trim();
+    const value = trimmed.slice(eq + 1).trim().replace(/^["']|["']$/g, '');
+    if (
+      key === 'MEADOW_HARDWARE_ID' ||
+      key === 'MEADOW_API_KEY' ||
+      key === 'MEADOW_DEVICE_ID'
+    ) {
+      (out as any)[key] = value;
     }
   }
-  const state: State = { hardware_id: deriveHardwareId() };
-  saveState(state);
-  return state;
+  return out;
 }
 
-function saveState(state: State) {
-  ensureStateDir();
-  // Write atomically via temp file + rename so a crash mid-write can't
-  // corrupt the state file.
-  const tmp = `${STATE_FILE}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
-  fs.renameSync(tmp, STATE_FILE);
-  // Defensive: ensure final perms are 0600 even if umask / FS played games.
+function writeBoxEnv(env: BoxEnv) {
+  ensureDir(BOX_ENV_FILE);
+  const tmp = `${BOX_ENV_FILE}.tmp`;
+  const lines = [
+    '# Generated by meadow-bootstrap. Do not hand-edit while paired.',
+    `MEADOW_HARDWARE_ID=${env.MEADOW_HARDWARE_ID ?? ''}`,
+    `MEADOW_API_KEY=${env.MEADOW_API_KEY ?? ''}`,
+    `MEADOW_DEVICE_ID=${env.MEADOW_DEVICE_ID ?? ''}`,
+  ];
+  fs.writeFileSync(tmp, lines.join('\n') + '\n', { mode: 0o600 });
+  fs.renameSync(tmp, BOX_ENV_FILE);
   try {
-    fs.chmodSync(STATE_FILE, 0o600);
+    fs.chmodSync(BOX_ENV_FILE, 0o600);
   } catch {
     // best effort
   }
 }
 
+function readOrCreatePairingCode(): string {
+  ensureDir(PAIRING_CODE_FILE);
+  if (fs.existsSync(PAIRING_CODE_FILE)) {
+    const existing = fs.readFileSync(PAIRING_CODE_FILE, 'utf-8').trim();
+    if (isValidPairingCode(existing)) return existing;
+    err(`malformed pairing-code at ${PAIRING_CODE_FILE}, regenerating`);
+  }
+  const code = generatePairingCode();
+  fs.writeFileSync(PAIRING_CODE_FILE, code + '\n', { mode: 0o600 });
+  return code;
+}
+
+function rewritePairingCode(code: string) {
+  fs.writeFileSync(PAIRING_CODE_FILE, code + '\n', { mode: 0o600 });
+}
+
 async function api(
+  method: 'POST' | 'GET',
   endpoint: string,
   body?: unknown,
-  headers: Record<string, string> = {},
-) {
+): Promise<{ status: number; body: any }> {
   const res = await fetch(`${API_URL}${endpoint}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...headers },
+    method,
+    headers: { 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
   });
   const text = await res.text();
@@ -121,71 +167,133 @@ async function api(
   return { status: res.status, body: parsed };
 }
 
-async function pair(state: State): Promise<void> {
-  log('starting pairing...');
-  const start = await api('/api/v1/pairing/start', {
-    hardware_id: state.hardware_id,
-    platform: PLATFORM,
-  });
-
-  if (start.status !== 201) {
-    err(`pairing/start failed: ${start.status} ${JSON.stringify(start.body)}`);
-    process.exit(1);
-  }
-
-  const { code, expires_in_seconds } = start.body;
-  const deadline = Date.now() + expires_in_seconds * 1000;
-
-  // Box has no display in v1 — code goes to journald. Operator can read
-  // via `journalctl -u meadow-bootstrap`. TODO: drive an LED/e-ink display
-  // once Dane's enclosure is finalized.
-  log('');
-  log(`PAIRING CODE: ${code}`);
-  log(`(expires in ${Math.floor(expires_in_seconds / 60)} minutes)`);
-  log('Enter this in the parent dashboard.');
-  log('');
-  log('polling for claim...');
-
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 3000));
-    const poll = await api('/api/v1/pairing/poll', {
-      code,
-      hardware_id: state.hardware_id,
+async function register(hardware_id: string, code: string): Promise<string> {
+  // Returns the code that ended up on the server. Retries on 409 by
+  // generating a fresh code (collision with another box, or a stale
+  // claimed row blocking re-use).
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const res = await api('POST', '/api/v1/pairing/register', {
+      hardware_id,
+      pairing_code: code,
+      platform: PLATFORM,
     });
-
-    if (poll.status === 200 && poll.body?.status === 'ready') {
-      state.api_key = poll.body.api_key;
-      state.device_id = poll.body.device_id;
-      saveState(state);
-      log(`claimed. device_id=${poll.body.device_id}`);
-      log(`credentials persisted to ${STATE_FILE}`);
-      return;
+    if (res.status === 201) {
+      log(`registered. expires in ${res.body.expires_in_seconds}s`);
+      return code;
     }
-
-    if (poll.status === 202) continue;
-
-    err(`poll failed: ${poll.status} ${JSON.stringify(poll.body)}`);
-    process.exit(1);
+    if (res.status === 409) {
+      log('pairing code collision, regenerating');
+      code = generatePairingCode();
+      rewritePairingCode(code);
+      continue;
+    }
+    err(`pairing/register failed: ${res.status} ${JSON.stringify(res.body)}`);
+    // For other errors, sleep + retry the same code. If the API is
+    // briefly down at boot, we want to keep trying.
+    await sleep(5000);
   }
+  throw new Error('could not register after 5 attempts');
+}
 
-  err('code expired without being claimed');
-  process.exit(1);
+async function pollUntilClaimed(hardware_id: string): Promise<{
+  api_key: string;
+  device_id: string;
+}> {
+  while (true) {
+    const res = await api(
+      'GET',
+      `/api/v1/pairing/box-status/${encodeURIComponent(hardware_id)}`,
+    );
+
+    if (res.status === 200 && res.body?.status === 'ready') {
+      return { api_key: res.body.api_key, device_id: res.body.device_id };
+    }
+    if (res.status === 200 && res.body?.status === 'pending') {
+      // expected — keep waiting.
+    } else if (res.status === 404) {
+      err('our registration disappeared — re-registering');
+      throw new Error('registration_missing');
+    } else if (res.status === 410) {
+      err(`pairing code ${res.body?.status ?? 'failed'} — restarting`);
+      throw new Error('registration_expired');
+    } else {
+      err(`unexpected status ${res.status} from box-status — retrying`);
+    }
+    await sleep(POLL_INTERVAL_MS);
+  }
+}
+
+async function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 async function main() {
   log(`api: ${API_URL}`);
-  log(`state file: ${STATE_FILE}`);
+  log(`box.env: ${BOX_ENV_FILE}`);
 
-  const state = loadState();
-  log(`hardware_id: ${state.hardware_id}`);
-
-  if (state.api_key && state.device_id) {
+  const existing = readBoxEnv();
+  if (existing.MEADOW_API_KEY && existing.MEADOW_DEVICE_ID) {
     log('already paired, exiting');
     return;
   }
 
-  await pair(state);
-  log('bootstrap complete');
+  const hardware_id = existing.MEADOW_HARDWARE_ID || deriveHardwareId();
+  log(`hardware_id: ${hardware_id}`);
+
+  // Outer retry loop: if the registration disappears or expires while
+  // we're polling, regenerate code and re-register.
+  while (true) {
+    let code = readOrCreatePairingCode();
+    log(`pairing code: ${code}`);
+
+    blinkBlue();
+    startPairingWeb(code);
+
+    try {
+      code = await register(hardware_id, code);
+      log('waiting for parent to claim...');
+      const { api_key, device_id } = await pollUntilClaimed(hardware_id);
+
+      writeBoxEnv({
+        MEADOW_HARDWARE_ID: hardware_id,
+        MEADOW_API_KEY: api_key,
+        MEADOW_DEVICE_ID: device_id,
+      });
+      log(`paired. device_id=${device_id}, credentials persisted.`);
+
+      solidGreen();
+      setStatus('paired');
+      // Hold so the parent sees the visual confirmation in person and
+      // on the meadow.local page before the web server tears down.
+      await sleep(POST_PAIR_HOLD_MS);
+      await stopPairingWeb();
+
+      // Drop pairing-code file — it's served its purpose. Reset path
+      // (rm box.env) is the documented re-pair flow.
+      try {
+        fs.unlinkSync(PAIRING_CODE_FILE);
+      } catch {
+        // ignore
+      }
+      return;
+    } catch (e) {
+      const msg = (e as Error).message;
+      if (msg === 'registration_missing' || msg === 'registration_expired') {
+        // Generate a fresh code and start over.
+        try {
+          fs.unlinkSync(PAIRING_CODE_FILE);
+        } catch {
+          // ignore
+        }
+        await stopPairingWeb();
+        await sleep(2000);
+        continue;
+      }
+      ledOff();
+      await stopPairingWeb();
+      throw e;
+    }
+  }
 }
 
 main().catch((e) => {

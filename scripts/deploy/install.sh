@@ -73,8 +73,15 @@ apt-get install -y -qq \
   curl ca-certificates gnupg git build-essential \
   postgresql postgresql-contrib redis-server \
   ufw \
+  avahi-daemon avahi-utils \
   >/dev/null
-ok "base packages installed"
+ok "base packages installed (incl. avahi for meadow.local)"
+
+# Avahi advertises the box's hostname (set by pi-setup.sh = 'meadow')
+# as meadow.local on the LAN, so the parent's phone can hit
+# http://meadow.local during the box-originated pairing flow.
+systemctl enable -q avahi-daemon 2>/dev/null || true
+systemctl start avahi-daemon 2>/dev/null || true
 
 # Node 20 LTS via NodeSource (Pi OS apt has older versions)
 if ! command -v node >/dev/null || [ "$(node -v | cut -d. -f1 | tr -d v)" -lt 20 ]; then
@@ -143,6 +150,15 @@ step "Setting up Redis"
 systemctl start redis-server
 systemctl enable -q redis-server
 ok "redis running"
+
+step "Setting up state directories"
+# /etc/meadow holds box.env (api key) — root-owned, meadow group
+# can read.
+# /var/lib/meadow holds the pairing-code generated at first boot —
+# meadow user owns it so the unprivileged bootstrap can write.
+mkdir -p /var/lib/meadow
+chown "$SYSTEM_USER:$SYSTEM_USER" /var/lib/meadow
+chmod 700 /var/lib/meadow
 
 step "Setting up environment file"
 mkdir -p "$ENV_DIR"

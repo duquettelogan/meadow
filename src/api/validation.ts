@@ -178,28 +178,23 @@ const pairingCode = z
   .max(9)
   .regex(/^[\d]{4}-?[\d]{4}$/, 'invalid pairing code (expected XXXX-XXXX)');
 
-export const PairingStartBody = z
+// Box-originated pairing flow (replaces /start, /claim, /poll).
+//
+// Box generates the code itself and POSTs /pairing/register with both
+// hardware_id + the code it picked. Parent reads the code off the box's
+// LAN web page (http://meadow.local) and POSTs /pairing/claim-by-code.
+// Box polls /pairing/box-status/:hardware_id for the API key.
+export const PairingRegisterBody = z
   .object({
     hardware_id: hardwareId,
-    platform,
+    pairing_code: pairingCode,
+    platform: platform.optional(),
   })
   .strict();
 
-// child_profile_id is now optional and ignored — pairing binds to the
-// family, not to a specific child. The field is left in the schema so
-// older clients (Base44 dashboards mid-rollout) don't get a 400 from
-// .strict(); they get accepted, the value is dropped on the server.
-export const PairingClaimBody = z
+export const ClaimByCodeBody = z
   .object({
-    code: pairingCode,
-    child_profile_id: uuid.optional(),
-  })
-  .strict();
-
-export const PairingPollBody = z
-  .object({
-    code: pairingCode,
-    hardware_id: hardwareId,
+    pairing_code: pairingCode,
   })
   .strict();
 

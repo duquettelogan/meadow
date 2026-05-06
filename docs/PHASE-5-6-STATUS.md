@@ -16,7 +16,7 @@ not after. Snapshot of what to do and the current status.
   middleware in `src/auth/middleware.ts`. Applied to the two endpoints
   that materially expand the account footprint:
   - `POST /api/v1/children` (creating a new child profile)
-  - `POST /api/v1/pairing/claim` (claiming a hardware box)
+  - `POST /api/v1/pairing/claim-by-code` (claiming a hardware box)
 
   Unverified parents get `403 {"error":"email_not_verified"}`; the
   dashboard surfaces a "verify your email first" UX and exposes

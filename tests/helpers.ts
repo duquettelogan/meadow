@@ -3,7 +3,7 @@ import { db } from '../src/db/connection';
 /**
  * Mark a parent's email as verified. Used by integration tests that
  * need to exercise endpoints behind the email-verification gate (POST
- * /api/v1/children, POST /api/v1/pairing/claim).
+ * /api/v1/children, POST /api/v1/pairing/claim-by-code).
  *
  * Tests that specifically exercise the gate should NOT call this —
  * see tests/integration/email-verification-gate.test.ts.

@@ -60,7 +60,7 @@ even for unknown emails.
 sits behind `requireParentAuth` on:
 
 - `POST /api/v1/children` (new child profile)
-- `POST /api/v1/pairing/claim` (claiming a hardware box)
+- `POST /api/v1/pairing/claim-by-code` (claiming a hardware box)
 
 Unverified parents get `403 {"error":"email_not_verified"}`. Login,
 /me, password reset, and `POST /api/v1/auth/resend-verification` stay
