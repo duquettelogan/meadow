@@ -39,6 +39,25 @@ const router = express.Router();
 const VERIFICATION_TTL_HOURS = 24;
 const RESET_TTL_HOURS = 1;
 
+/**
+ * Categories enabled by default on the Household filter policy at
+ * signup time. The safety floor: every new family blocks malware,
+ * phishing, and adult content from the first DNS query — parents
+ * never see the "wait, my kid hit a phishing site on day one"
+ * scenario. Everything else (social_media, gambling, gaming, etc.)
+ * ships off and parents toggle them on in settings.
+ *
+ * Note: malware / phishing / adult are also enforced unconditionally
+ * by the categorized blocklist (src/cache/blocklist.ts), so disabling
+ * them in the dashboard does NOT disable the underlying block — the
+ * dashboard surfaces what's active, not a kill switch.
+ */
+const DEFAULT_HOUSEHOLD_BLOCKED_CATEGORIES = [
+  'malware',
+  'phishing',
+  'adult_content',
+];
+
 function newToken(): string {
   // 32 bytes → 43 base64url chars. Plenty of entropy, URL-safe, no padding.
   return crypto.randomBytes(32).toString('base64url');
@@ -146,9 +165,19 @@ router.post(
          RETURNING id`,
         [family.id]
       );
+      // Default safety floor: malware, phishing, and adult content are
+      // enabled at signup. Other category toggles (social media, gambling,
+      // gaming, etc.) ship disabled — parents adjust them in settings.
+      // Stored on filter_policies.blocked_categories so the dashboard
+      // surfaces the active state out of the gate without a follow-up
+      // PATCH from the client.
       await client.query(
-        'INSERT INTO filter_policies (child_profile_id) VALUES ($1)',
-        [householdResult.rows[0].id]
+        `INSERT INTO filter_policies (child_profile_id, blocked_categories)
+         VALUES ($1, $2::jsonb)`,
+        [
+          householdResult.rows[0].id,
+          JSON.stringify(DEFAULT_HOUSEHOLD_BLOCKED_CATEGORIES),
+        ]
       );
 
       await client.query('COMMIT');

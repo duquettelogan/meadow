@@ -64,10 +64,30 @@ describe('signup creates Household child + filter_policy', () => {
     expect(hh.rows[0].tier).toBe('standard');
 
     const policy = await db.query(
-      'SELECT 1 FROM filter_policies WHERE child_profile_id = $1',
+      `SELECT blocked_categories, allowed_domains, blocked_domains,
+              safe_search_enforce, youtube_restrict
+       FROM filter_policies WHERE child_profile_id = $1`,
       [hh.rows[0].id],
     );
     expect(policy.rows.length).toBe(1);
+
+    // Safety-floor defaults: malware + phishing + adult_content ON;
+    // every other category ships off so parents opt in deliberately
+    // (social_media, gambling, gaming, etc.).
+    const cats = policy.rows[0].blocked_categories;
+    const list: string[] = Array.isArray(cats) ? cats : JSON.parse(cats);
+    expect(list).toEqual(
+      expect.arrayContaining(['malware', 'phishing', 'adult_content']),
+    );
+    expect(list.length).toBe(3);
+
+    // Other defaults still come from the schema.
+    expect(policy.rows[0].safe_search_enforce).toBe(true);
+    expect(policy.rows[0].youtube_restrict).toBe(true);
+    const allowed = policy.rows[0].allowed_domains;
+    const blocked = policy.rows[0].blocked_domains;
+    expect(Array.isArray(allowed) ? allowed : JSON.parse(allowed)).toEqual([]);
+    expect(Array.isArray(blocked) ? blocked : JSON.parse(blocked)).toEqual([]);
   });
 });
 
