@@ -36,12 +36,25 @@ process.env.DNS_PORT = '0';
 // test accidentally imports index.ts later.
 process.env.DISABLE_HEARTBEAT = '1';
 
-// Close the connection pool after all tests so the process can exit.
+// Close the connection pool + Redis client after all tests so the
+// process can exit cleanly.
 afterAll(async () => {
   try {
     const { db } = await import('../src/db/connection');
     await db.end();
   } catch {
     // pool may already be closed
+  }
+  try {
+    const { disconnectCache } = await import('../src/cache/index');
+    await disconnectCache();
+  } catch {
+    // not connected
+  }
+  try {
+    const { _disconnectForTests } = await import('../src/auth/revocation');
+    await _disconnectForTests();
+  } catch {
+    // not connected
   }
 });
