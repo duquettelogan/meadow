@@ -17,7 +17,7 @@ async function makeVerifiedParent() {
   const email = uniqueEmail();
   const sig = await request(app)
     .post('/api/v1/auth/signup')
-    .send({ email, password: 'bnspw12345' });
+    .send({ email, password: 'bnspw12345678' });
   expect(sig.status).toBe(201);
   await verifyEmailFor(email);
   return {
