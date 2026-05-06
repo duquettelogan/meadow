@@ -249,39 +249,81 @@ app.patch(
 );
 
 // Delete a child profile. Verified parent must own the child's family.
-// CASCADE behavior (set in migrate-007):
-//   - filter_policies row for this child:  CASCADE-deleted
-//   - block_counters rows for this child:  CASCADE-deleted (already)
-//   - devices.child_profile_id pointing here: SET NULL (devices stay
-//     in the family, become unassigned, parent can re-assign or delete)
-//   - audit_log rows about this child:     PRESERVED (no FK by design)
+//
+// Cleanup is done MANUALLY in a transaction rather than relying on FK
+// CASCADE. Migration 007 was supposed to add ON DELETE CASCADE to
+// filter_policies and SET NULL to devices.child_profile_id, but it
+// landed inconsistently in production (Postgres auto-generated FK names
+// can vary, and the DROP CONSTRAINT IF EXISTS ... ADD CONSTRAINT
+// approach can leave a duplicate restrictive constraint that blocks
+// the cascade). Doing the cleanup explicitly here is bulletproof:
+// works regardless of whether the schema-level cascades are wired up.
+//
+// Cleanup contract:
+//   - filter_policies rows for this child:  DELETED
+//   - block_counters rows for this child:   DELETED
+//   - devices.child_profile_id == childId:  SET NULL (devices survive
+//                                           in the family as unassigned)
+//   - audit_log rows about this child:      PRESERVED (no FK by design)
+//   - new audit row child.deleted:          appended after COMMIT
 app.delete(
   '/api/v1/children/:childId',
   requireParentAuth,
   requireVerifiedParent,
   async (req, res) => {
     const childId = req.params.childId as string;
+    const client = await db.connect();
     try {
-      const result = await db.query(
-        `DELETE FROM child_profiles
-         WHERE id = $1 AND family_id = $2
-         RETURNING id`,
+      await client.query('BEGIN');
+
+      // Ownership check inside the transaction so a concurrent delete
+      // can't slip in between SELECT and DELETE. Conflates "doesn't
+      // exist" and "not in your family" — same response prevents
+      // existence-probing across families.
+      const owns = await client.query(
+        `SELECT 1 FROM child_profiles
+         WHERE id = $1 AND family_id = $2`,
         [childId, req.parent!.family_id],
       );
-      if (result.rows.length === 0) {
-        // Conflates "doesn't exist" and "not in your family" — same
-        // response prevents existence-probing across families.
+      if (owns.rows.length === 0) {
+        await client.query('ROLLBACK');
         res.status(403).json({ error: 'forbidden' });
         return;
       }
+
+      // Order matters: clear/cleanup dependents before the parent row.
+      // SET NULL on devices first so they survive as unassigned.
+      await client.query(
+        'UPDATE devices SET child_profile_id = NULL WHERE child_profile_id = $1',
+        [childId],
+      );
+      await client.query(
+        'DELETE FROM block_counters WHERE child_profile_id = $1',
+        [childId],
+      );
+      await client.query(
+        'DELETE FROM filter_policies WHERE child_profile_id = $1',
+        [childId],
+      );
+      await client.query(
+        'DELETE FROM child_profiles WHERE id = $1',
+        [childId],
+      );
+
+      await client.query('COMMIT');
+
       audit(req, 'child.deleted', {
         target_kind: 'child_profile',
         target_id: childId,
       });
+
       res.status(204).end();
     } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
       console.error('child delete failed:', err);
       res.status(500).json({ error: 'internal server error' });
+    } finally {
+      client.release();
     }
   },
 );
@@ -371,36 +413,72 @@ app.get(
 );
 
 // Delete a device. Verified parent must own the device's family.
-// CASCADE behavior (FKs set in migrate-003 / migrate-004):
-//   - api_keys for this device:        CASCADE-deleted
-//   - pairing_codes.device_id:         CASCADE-deleted
-//   - pairing_codes.api_key_id:        CASCADE-deleted
-//   - audit_log rows about this device: PRESERVED (no FK by design)
+// Same manual-cleanup posture as DELETE /children — explicit deletes
+// in a transaction so prod schema state can't break us.
+//
+// Cleanup contract:
+//   - pairing_codes referencing this device or its keys: DELETED
+//     (device_id direct ref OR api_key_id pointing at this device's keys)
+//   - api_keys for this device:                          DELETED
+//   - audit_log rows about this device:                  PRESERVED
+//   - new audit row device.deleted:                      appended after COMMIT
+//
+// The hardware box holding the deleted api_key starts getting 401 on
+// /resolve and /dns-query within seconds — intended for "decommission"
+// and "reset hand-me-down box" flows.
 app.delete(
   '/api/v1/devices/:deviceId',
   requireParentAuth,
   requireVerifiedParent,
   async (req, res) => {
     const deviceId = req.params.deviceId as string;
+    const client = await db.connect();
     try {
-      const result = await db.query(
-        `DELETE FROM devices
-         WHERE id = $1 AND family_id = $2
-         RETURNING id`,
+      await client.query('BEGIN');
+
+      const owns = await client.query(
+        `SELECT 1 FROM devices
+         WHERE id = $1 AND family_id = $2`,
         [deviceId, req.parent!.family_id],
       );
-      if (result.rows.length === 0) {
+      if (owns.rows.length === 0) {
+        await client.query('ROLLBACK');
         res.status(403).json({ error: 'forbidden' });
         return;
       }
+
+      // Pairing codes can reference EITHER the device directly OR an
+      // api_key for this device. Catch both before deleting api_keys
+      // (otherwise a pairing_code → api_key FK would block).
+      await client.query(
+        `DELETE FROM pairing_codes
+         WHERE device_id = $1
+            OR api_key_id IN (SELECT id FROM api_keys WHERE device_id = $1)`,
+        [deviceId],
+      );
+      await client.query(
+        'DELETE FROM api_keys WHERE device_id = $1',
+        [deviceId],
+      );
+      await client.query(
+        'DELETE FROM devices WHERE id = $1',
+        [deviceId],
+      );
+
+      await client.query('COMMIT');
+
       audit(req, 'device.deleted', {
         target_kind: 'device',
         target_id: deviceId,
       });
+
       res.status(204).end();
     } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
       console.error('device delete failed:', err);
       res.status(500).json({ error: 'internal server error' });
+    } finally {
+      client.release();
     }
   },
 );
