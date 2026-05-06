@@ -1,129 +1,126 @@
 import express, { Request, Response } from 'express';
-import crypto from 'crypto';
 import { db } from '../db/connection';
 import { generateApiKey } from '../auth/keys';
 import { requireParentAuth, requireVerifiedParent } from '../auth/middleware';
 import { validateBody } from './middleware';
 import {
-  PairingStartBody,
-  PairingClaimBody,
-  PairingPollBody,
+  PairingRegisterBody,
+  ClaimByCodeBody,
 } from './validation';
 import { pairingClaimLimiter, pairingDeviceLimiter } from './rate-limits';
 import { audit } from '../audit/log';
 
 const router = express.Router();
 
-const CODE_TTL_MINUTES = 10;
-
-/**
- * Generate an 8-digit pairing code, formatted as XXXX-XXXX. 100M codes
- * means brute force at the rate-limited 10/15min ceiling takes 285 years
- * in expectation. v0 used 6 digits (1M space) — this is 100x harder.
- *
- * Uses crypto.randomInt for uniform distribution.
- */
-function generatePairingCode(): string {
-  const n = crypto.randomInt(0, 100_000_000);
-  const padded = n.toString().padStart(8, '0');
-  return `${padded.slice(0, 4)}-${padded.slice(4)}`;
-}
+const CODE_TTL_MINUTES = parseInt(
+  process.env.PAIRING_CODE_TTL_MINUTES ?? '1440', // 24h default
+  10,
+);
 
 function normalizeCode(input: string): string {
-  // Accept both "1234-5678" and "12345678" — strip non-digits and reformat.
+  // Accept "1234-5678" or "12345678" — strip non-digits and reformat.
   const digits = input.replace(/\D/g, '');
   if (digits.length !== 8) return input;
   return `${digits.slice(0, 4)}-${digits.slice(4)}`;
 }
 
 /**
- * POST /api/v1/pairing/start
- * Device initiates pairing. Anonymous endpoint.
+ * POST /api/v1/pairing/register
  *
- * Returns a code the parent will enter in the dashboard.
+ * Box-originated registration. Box generates the 8-digit code itself
+ * and POSTs it here along with its hardware_id. The server stores an
+ * unclaimed row in pairing_codes (family_id NULL, claimed_at NULL).
+ * Anonymous endpoint — no parent auth.
+ *
+ * Idempotent on the (hardware_id, code) pair: a re-register with the
+ * same hardware_id refreshes expires_at on the existing unclaimed row.
+ * A different hardware_id colliding on the code returns 409 — the box
+ * regenerates and retries.
+ *
+ * Older /pairing/start (server-generated code) flow has been removed —
+ * see docs/dashboard-api-notes.md.
  */
 router.post(
-  '/start',
+  '/register',
   pairingDeviceLimiter,
-  validateBody(PairingStartBody),
+  validateBody(PairingRegisterBody),
   async (req: Request, res: Response) => {
-    const { hardware_id, platform } = req.body as {
+    const { hardware_id, pairing_code, platform } = req.body as {
       hardware_id: string;
-      platform: string;
+      pairing_code: string;
+      platform?: string;
     };
+    const code = normalizeCode(pairing_code);
 
     try {
-      // Generate a code, retry on the rare collision with an active code.
-      let code = '';
-      let inserted = false;
-      for (let attempt = 0; attempt < 5; attempt++) {
-        code = generatePairingCode();
-        try {
-          await db.query(
-            `INSERT INTO pairing_codes (code, hardware_id, platform, expires_at)
-             VALUES ($1, $2, $3, NOW() + INTERVAL '${CODE_TTL_MINUTES} minutes')`,
-            [code, hardware_id, platform]
-          );
-          inserted = true;
-          break;
-        } catch (err: any) {
-          if (err.code === '23505') continue; // unique violation, retry
-          throw err;
-        }
-      }
-
-      if (!inserted) {
-        res.status(503).json({ error: 'could not generate pairing code, try again' });
-        return;
-      }
-
-      // Best-effort: prune expired codes so the table stays small.
+      // Best-effort: prune stale rows so the table stays small.
       db.query(
         `DELETE FROM pairing_codes
          WHERE expires_at < NOW() AND claimed_at IS NULL`
       ).catch(() => {});
 
+      // Try insert. ON CONFLICT (code) we have two cases:
+      //   - same hardware_id and still unclaimed → refresh expires_at
+      //   - different hardware_id, OR row already claimed → 409 (box
+      //     regenerates and retries).
+      const result = await db.query(
+        `INSERT INTO pairing_codes (code, hardware_id, platform, expires_at)
+         VALUES ($1, $2, $3, NOW() + ($4 || ' minutes')::interval)
+         ON CONFLICT (code) DO UPDATE SET
+           expires_at = NOW() + ($4 || ' minutes')::interval
+         WHERE pairing_codes.hardware_id = EXCLUDED.hardware_id
+           AND pairing_codes.claimed_at IS NULL
+         RETURNING id`,
+        [code, hardware_id, platform ?? 'router', String(CODE_TTL_MINUTES)]
+      );
+
+      if (result.rows.length === 0) {
+        // ON CONFLICT was hit but the WHERE in DO UPDATE filtered it
+        // out — same code, different hardware_id, OR already claimed.
+        res.status(409).json({ error: 'pairing code in use' });
+        return;
+      }
+
       audit(req, 'pairing.started', {
         target_kind: 'pairing_code',
-        metadata: { hardware_id: hardware_id.slice(0, 64), platform },
+        metadata: {
+          hardware_id: hardware_id.slice(0, 64),
+          platform: platform ?? 'router',
+        },
       });
       res.status(201).json({
-        code,
         expires_in_seconds: CODE_TTL_MINUTES * 60,
       });
     } catch (err) {
-      console.error('pairing/start failed:', err);
+      console.error('pairing/register failed:', err);
       res.status(500).json({ error: 'internal server error' });
     }
   }
 );
 
 /**
- * POST /api/v1/pairing/claim
- * Parent claims a code from the dashboard. The pairing binds the box
- * to the parent's family — there's no per-child binding in v1. The
- * dashboard can label the device cosmetically via PATCH /devices/:id
- * after the fact. The body MAY still include child_profile_id for
- * back-compat with older dashboards, but it's ignored on the server.
+ * POST /api/v1/pairing/claim-by-code
+ *
+ * Parent reads the code off the box's LAN web page (http://meadow.local)
+ * and submits it via the dashboard. Server claims the unclaimed row,
+ * stamps family_id + claimed_at, generates the API key, and returns
+ * device_id. The actual api_key is delivered to the box on its next
+ * /box-status/:hardware_id poll (single-shot reveal).
  */
 router.post(
-  '/claim',
+  '/claim-by-code',
   pairingClaimLimiter,
   requireParentAuth,
   requireVerifiedParent,
-  validateBody(PairingClaimBody),
+  validateBody(ClaimByCodeBody),
   async (req: Request, res: Response) => {
-    const { code: rawCode } = req.body as {
-      code: string;
-      child_profile_id?: string; // accepted, ignored
-    };
-    const code = normalizeCode(rawCode);
+    const { pairing_code } = req.body as { pairing_code: string };
+    const code = normalizeCode(pairing_code);
 
     const client = await db.connect();
     try {
       await client.query('BEGIN');
 
-      // Look up + lock the pairing row.
       const pairing = await client.query(
         `SELECT id, hardware_id, platform, expires_at, claimed_at
          FROM pairing_codes
@@ -149,9 +146,8 @@ router.post(
         return;
       }
 
-      // Create the device row in the parent's family — no child binding
-      // (the resolver uses the family's Household policy regardless).
-      // The hardware_id from the pairing flow becomes the device_token.
+      // Create the device row in the parent's family — no child binding.
+      // The box's hardware_id becomes the device_token.
       const deviceResult = await client.query(
         `INSERT INTO devices (family_id, child_profile_id, platform, device_token, last_seen)
          VALUES ($1, NULL, $2, $3, NOW())
@@ -166,8 +162,6 @@ router.post(
       );
       const deviceId = deviceResult.rows[0].id;
 
-      // Generate the API key. The plaintext is stored on the pairing row
-      // briefly, then cleared as soon as the device polls for it.
       const key = generateApiKey();
       const apiKeyResult = await client.query(
         `INSERT INTO api_keys (device_id, key_prefix, key_hash)
@@ -177,8 +171,6 @@ router.post(
       );
       const apiKeyId = apiKeyResult.rows[0].id;
 
-      // Stash family_id on pairing_codes so the claim record is
-      // family-scoped without needing a parent → family lookup later.
       await client.query(
         `UPDATE pairing_codes
          SET claimed_at = NOW(),
@@ -216,7 +208,7 @@ router.post(
       });
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
-      console.error('pairing/claim failed:', err);
+      console.error('pairing/claim-by-code failed:', err);
       res.status(500).json({ error: 'internal server error' });
     } finally {
       client.release();
@@ -225,70 +217,65 @@ router.post(
 );
 
 /**
- * POST /api/v1/pairing/poll
- * Device polls for the API key. Anonymous, but we verify hardware_id
- * matches the original request to prevent code-stealing.
+ * GET /api/v1/pairing/box-status/:hardware_id
+ *
+ * Box polls every ~10s while waiting to be claimed. Returns:
+ *   - 200 {status: 'pending'}  — unclaimed
+ *   - 200 {status: 'ready', api_key, device_id} — first poll after
+ *                                                  claim. Single-shot:
+ *                                                  plaintext_key clears
+ *                                                  as soon as it's returned.
+ *   - 410 {status: 'already_retrieved'} — claimed and key already
+ *                                          fetched in a prior poll.
+ *   - 410 {status: 'expired'} — pairing code expired before claim.
+ *   - 404                       — no registration matches hardware_id.
+ *
+ * Anonymous (rate-limited via pairingDeviceLimiter). hardware_id is
+ * derived from /etc/machine-id and not publicly known.
  */
-router.post(
-  '/poll',
+router.get(
+  '/box-status/:hardware_id',
   pairingDeviceLimiter,
-  validateBody(PairingPollBody),
   async (req: Request, res: Response) => {
-    const { code: rawCode, hardware_id } = req.body as {
-      code: string;
-      hardware_id: string;
-    };
-    const code = normalizeCode(rawCode);
+    const hardware_id = req.params.hardware_id as string;
+    if (!/^[a-zA-Z0-9_-]{8,128}$/.test(hardware_id)) {
+      res.status(400).json({ error: 'invalid hardware_id' });
+      return;
+    }
 
     try {
       const result = await db.query(
-        `SELECT id, hardware_id, expires_at, claimed_at,
-                device_id, plaintext_key
+        `SELECT id, expires_at, claimed_at, device_id, plaintext_key
          FROM pairing_codes
-         WHERE code = $1`,
-        [code]
+         WHERE hardware_id = $1
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [hardware_id]
       );
 
       if (result.rows.length === 0) {
-        res.status(404).json({ error: 'invalid code' });
+        res.status(404).json({ error: 'no registration for hardware_id' });
         return;
       }
 
       const row = result.rows[0];
 
-      // Hardware ID must match. Mismatch = code-stealing attempt.
-      if (row.hardware_id !== hardware_id) {
-        audit(req, 'pairing.poll.hardware_mismatch', {
-          target_kind: 'pairing_code',
-          metadata: {
-            expected_hw_prefix: String(row.hardware_id).slice(0, 16),
-            got_hw_prefix: hardware_id.slice(0, 16),
-          },
-        });
-        res.status(401).json({ error: 'hardware id mismatch' });
-        return;
-      }
-
-      if (new Date(row.expires_at).getTime() < Date.now() && !row.claimed_at) {
-        res.status(410).json({ error: 'code expired' });
-        return;
-      }
-
       if (!row.claimed_at) {
-        res.status(202).json({ status: 'pending' });
+        if (new Date(row.expires_at).getTime() < Date.now()) {
+          res.status(410).json({ status: 'expired' });
+          return;
+        }
+        res.status(200).json({ status: 'pending' });
         return;
       }
 
       if (!row.plaintext_key) {
-        // Already retrieved once. Don't show the key again.
-        res.status(410).json({ error: 'key already retrieved' });
+        res.status(410).json({ status: 'already_retrieved' });
         return;
       }
 
       const apiKey = row.plaintext_key as string;
 
-      // Single-use: clear the plaintext immediately and mark revealed.
-      // Even if delivery fails, we never show the same key twice.
       await db.query(
         `UPDATE pairing_codes
          SET plaintext_key = NULL,
@@ -303,7 +290,7 @@ router.post(
         device_id: row.device_id,
       });
     } catch (err) {
-      console.error('pairing/poll failed:', err);
+      console.error('pairing/box-status failed:', err);
       res.status(500).json({ error: 'internal server error' });
     }
   }

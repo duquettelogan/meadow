@@ -32,22 +32,35 @@ async function makeVerifiedParent() {
   };
 }
 
+// Box-originated v1 pairing flow: box generates code, registers with
+// API, parent reads code from meadow.local and POSTs claim-by-code,
+// box polls box-status to receive the api_key.
+const uniquePairingCodeForTest = () =>
+  String(99_000_000 + Math.floor(Math.random() * 999_999))
+    .padStart(8, '0')
+    .replace(/(\d{4})(\d{4})/, '$1-$2');
+
 async function pairBoxFor(token: string): Promise<string> {
   const hardware_id = uniqueHwId();
-  const start = await request(app)
-    .post('/api/v1/pairing/start')
-    .send({ hardware_id, platform: 'router' });
-  expect(start.status).toBe(201);
+  const code = uniquePairingCodeForTest();
+
+  const reg = await request(app)
+    .post('/api/v1/pairing/register')
+    .send({ hardware_id, pairing_code: code, platform: 'router' });
+  expect(reg.status).toBe(201);
+
   const claim = await request(app)
-    .post('/api/v1/pairing/claim')
+    .post('/api/v1/pairing/claim-by-code')
     .set('Authorization', `Bearer ${token}`)
-    .send({ code: start.body.code });
+    .send({ pairing_code: code });
   expect(claim.status).toBe(200);
-  const poll = await request(app)
-    .post('/api/v1/pairing/poll')
-    .send({ code: start.body.code, hardware_id });
-  expect(poll.status).toBe(200);
-  return poll.body.api_key as string;
+
+  const status = await request(app).get(
+    `/api/v1/pairing/box-status/${hardware_id}`,
+  );
+  expect(status.status).toBe(200);
+  expect(status.body.status).toBe('ready');
+  return status.body.api_key as string;
 }
 
 describe('signup creates Household child + filter_policy', () => {
@@ -114,34 +127,32 @@ describe('GET /api/v1/children excludes the Household child', () => {
   });
 });
 
-describe('POST /api/v1/pairing/start does not require child_profile_id', () => {
-  it('claim succeeds with body containing only {code}', async () => {
+describe('Box-originated pairing binds device to family but NOT to a child', () => {
+  it('claim-by-code creates device with child_profile_id null + stamps pairing_codes.family_id', async () => {
     const { token } = await makeVerifiedParent();
     const hardware_id = uniqueHwId();
+    const code = uniquePairingCodeForTest();
 
-    const start = await request(app)
-      .post('/api/v1/pairing/start')
-      .send({ hardware_id, platform: 'router' });
-    expect(start.status).toBe(201);
+    await request(app)
+      .post('/api/v1/pairing/register')
+      .send({ hardware_id, pairing_code: code });
 
     const claim = await request(app)
-      .post('/api/v1/pairing/claim')
+      .post('/api/v1/pairing/claim-by-code')
       .set('Authorization', `Bearer ${token}`)
-      .send({ code: start.body.code }); // no child_profile_id
+      .send({ pairing_code: code });
     expect(claim.status).toBe(200);
     expect(claim.body.family_id).toBeTruthy();
 
-    // Pairing claim binds device to family but NOT to a child.
     const dev = await db.query(
       'SELECT family_id, child_profile_id FROM devices WHERE id = $1',
       [claim.body.device_id],
     );
     expect(dev.rows[0].child_profile_id).toBeNull();
 
-    // pairing_codes.family_id is set so the claim record is family-scoped.
     const pc = await db.query(
       'SELECT family_id FROM pairing_codes WHERE code = $1',
-      [start.body.code],
+      [code],
     );
     expect(pc.rows[0].family_id).toBe(claim.body.family_id);
   });

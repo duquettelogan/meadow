@@ -26,6 +26,7 @@ import {
   HeartbeatBody,
   DiscoveredDeviceBody,
   UpdateDeviceBody,
+  BoxNetworkStatusBody,
 } from './validation';
 import { resolveLimiter, defaultLimiter } from './rate-limits';
 import { audit } from '../audit/log';
@@ -742,6 +743,138 @@ app.post(
     }
   },
 );
+
+// ---------- Box network status ----------
+// Box pushes its current DHCP-handoff state here after pairing,
+// after every retry-network click, and on every periodic re-check.
+// Stored on devices.network_status (JSONB) so the dashboard's box
+// health panel can poll the GET endpoint below without going through
+// the heartbeat shape.
+app.post(
+  '/api/v1/box/network-status',
+  requireDeviceAuth,
+  validateBody(BoxNetworkStatusBody),
+  async (req, res) => {
+    const body = req.body as Record<string, unknown>;
+    try {
+      const payload = {
+        ...body,
+        last_check_at:
+          (body.last_check_at as string | undefined) ??
+          new Date().toISOString(),
+      };
+      await db.query(
+        `UPDATE devices
+         SET network_status = $2::jsonb,
+             last_seen = NOW()
+         WHERE id = $1`,
+        [req.device!.device_id, JSON.stringify(payload)],
+      );
+
+      const action: 'box.network.conflict' | 'box.network.reported' =
+        body.conflict_detected === true
+          ? 'box.network.conflict'
+          : 'box.network.reported';
+      audit(req, action, {
+        target_kind: 'device',
+        target_id: req.device!.device_id,
+        metadata: {
+          dhcp_active: body.dhcp_active,
+          conflict_detected: body.conflict_detected,
+          servers_seen: body.servers_seen ?? [],
+        },
+      });
+      res.status(204).end();
+    } catch (err) {
+      console.error('box network-status post failed:', err);
+      res.status(500).json({ error: 'internal server error' });
+    }
+  },
+);
+
+// Dashboard-facing read of the box's last reported network status.
+// Family-scoped — returns the most recently active device in the
+// family that has a network_status payload (typically the one paired
+// box). Empty 200 if the family has no box-shaped device yet.
+app.get('/api/v1/box/network-status', requireParentAuth, async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT id, network_status
+       FROM devices
+       WHERE family_id = $1 AND network_status IS NOT NULL
+       ORDER BY last_seen DESC NULLS LAST
+       LIMIT 1`,
+      [req.parent!.family_id],
+    );
+    if (result.rows.length === 0) {
+      res.json({
+        dhcp_active: false,
+        conflict_detected: false,
+        leases_count: 0,
+        last_check: null,
+      });
+      return;
+    }
+    const ns = result.rows[0].network_status as Record<string, unknown>;
+    res.json({
+      dhcp_active: Boolean(ns.dhcp_active),
+      conflict_detected: Boolean(ns.conflict_detected),
+      leases_count: Number(ns.leases_count ?? 0),
+      last_check: ns.last_check_at ?? null,
+      servers_seen: Array.isArray(ns.servers_seen) ? ns.servers_seen : [],
+      box_ip: ns.box_ip ?? null,
+      gateway_ip: ns.gateway_ip ?? null,
+    });
+  } catch (err) {
+    console.error('box network-status get failed:', err);
+    res.status(500).json({ error: 'internal server error' });
+  }
+});
+
+// Roll-up health view for the dashboard's Box Health panel — paired
+// status, last heartbeat, network status, hardware id. Combines info
+// from devices.last_seen + last_health_payload + network_status.
+// Returns the family's most recently active "box" device (we treat
+// the device created via /pairing/claim-by-code as the box; for v1
+// each family has at most one).
+app.get('/api/v1/box/health', requireParentAuth, async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT id, device_token, last_seen, last_health_payload, network_status
+       FROM devices
+       WHERE family_id = $1
+       ORDER BY last_seen DESC NULLS LAST
+       LIMIT 1`,
+      [req.parent!.family_id],
+    );
+    if (result.rows.length === 0) {
+      res.json({
+        paired: false,
+        last_heartbeat: null,
+        network_status: null,
+        hardware_id: null,
+      });
+      return;
+    }
+    const row = result.rows[0];
+    const ns = (row.network_status ?? null) as Record<string, unknown> | null;
+    res.json({
+      paired: true,
+      last_heartbeat: row.last_seen,
+      network_status: ns
+        ? {
+            dhcp_active: Boolean(ns.dhcp_active),
+            conflict_detected: Boolean(ns.conflict_detected),
+            leases_count: Number(ns.leases_count ?? 0),
+          }
+        : null,
+      hardware_id: row.device_token,
+    });
+  } catch (err) {
+    console.error('box health get failed:', err);
+    res.status(500).json({ error: 'internal server error' });
+  }
+});
 
 // ---------- Counters ----------
 app.get(

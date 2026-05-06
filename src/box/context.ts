@@ -1,9 +1,10 @@
 /**
  * Box runtime context.
  *
- * On startup, reads /etc/meadow/state.json (written by the bootstrap
- * script) and resolves the box's device_id to the family it's paired
- * to + the family's Household child profile id.
+ * v1.5: reads /etc/meadow/box.env (key=value, written by bootstrap.ts
+ * after the box-originated pairing flow completes) instead of the
+ * older /etc/meadow/state.json. systemd EnvironmentFile= can also
+ * source this directly, which simplifies process.env wiring on the box.
  *
  * In v1, DNS resolution is family-scoped (not per-child), so the
  * resolver only needs the family's Household policy. The Household
@@ -18,7 +19,11 @@
 import * as fs from 'fs';
 import { db } from '../db/connection';
 
-const STATE_FILE = process.env.STATE_FILE || '/etc/meadow/state.json';
+const BOX_ENV_FILE = process.env.BOX_ENV_FILE || '/etc/meadow/box.env';
+// Back-compat: if box.env doesn't exist but the v0 state.json does,
+// fall back to that. v0 deployments were never shipped to households,
+// but Logan's dev boxes may still have a state.json lying around.
+const LEGACY_STATE_FILE = process.env.STATE_FILE || '/etc/meadow/state.json';
 
 interface PersistedState {
   hardware_id: string;
@@ -35,37 +40,68 @@ export interface BoxContext {
 
 let cached: BoxContext | null = null;
 
+function readBoxEnv(): PersistedState | null {
+  if (!fs.existsSync(BOX_ENV_FILE)) return null;
+  try {
+    const out: any = {};
+    for (const line of fs.readFileSync(BOX_ENV_FILE, 'utf-8').split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eq = trimmed.indexOf('=');
+      if (eq < 0) continue;
+      const key = trimmed.slice(0, eq).trim();
+      const value = trimmed
+        .slice(eq + 1)
+        .trim()
+        .replace(/^["']|["']$/g, '');
+      if (key === 'MEADOW_HARDWARE_ID') out.hardware_id = value;
+      if (key === 'MEADOW_API_KEY') out.api_key = value;
+      if (key === 'MEADOW_DEVICE_ID') out.device_id = value;
+    }
+    if (!out.hardware_id) return null;
+    return out as PersistedState;
+  } catch (err) {
+    console.error(`[box] failed to read ${BOX_ENV_FILE}:`, err);
+    return null;
+  }
+}
+
+function readLegacyStateJson(): PersistedState | null {
+  if (!fs.existsSync(LEGACY_STATE_FILE)) return null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(LEGACY_STATE_FILE, 'utf-8'));
+    if (parsed && typeof parsed.hardware_id === 'string') {
+      return parsed;
+    }
+  } catch (err) {
+    console.error(`[box] failed to parse ${LEGACY_STATE_FILE}:`, err);
+  }
+  return null;
+}
+
 /**
  * Load the box context from disk + DB. Idempotent — safe to call
  * multiple times. Returns null if the box is not yet paired or the
- * state file is missing (dev mode, fresh install before bootstrap
+ * state files are missing (dev mode, fresh install before bootstrap
  * has run, etc).
  */
 export async function loadBoxContext(): Promise<BoxContext | null> {
   if (cached) return cached;
 
-  if (!fs.existsSync(STATE_FILE)) {
-    console.log(`[box] no state file at ${STATE_FILE} — running unpaired`);
-    return null;
-  }
-
-  let state: PersistedState;
-  try {
-    state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf-8'));
-  } catch (err) {
-    console.error(`[box] failed to parse ${STATE_FILE}:`, err);
+  const state = readBoxEnv() ?? readLegacyStateJson();
+  if (!state) {
+    console.log(
+      `[box] no state at ${BOX_ENV_FILE} (legacy: ${LEGACY_STATE_FILE}) — running unpaired`,
+    );
     return null;
   }
 
   if (!state.device_id) {
-    console.log('[box] state file has no device_id — not paired yet');
+    console.log('[box] state has no device_id — not paired yet');
     return null;
   }
 
-  // Resolve device → family → Household child in one query. Household
-  // is created at signup (and back-filled by migration 008 for older
-  // families) so the LEFT JOIN should always hit, but we tolerate
-  // null household_child_id and skip counter writes if so.
+  // Resolve device → family → Household child in one query.
   try {
     const result = await db.query(
       `SELECT d.family_id, hh.id AS household_child_id

@@ -29,20 +29,29 @@ async function makeVerifiedFamily() {
   };
 }
 
+const uniquePairingCodeForTest = () =>
+  String(99_000_000 + Math.floor(Math.random() * 999_999))
+    .padStart(8, '0')
+    .replace(/(\d{4})(\d{4})/, '$1-$2');
+
 async function pairBoxFor(token: string): Promise<string> {
   const hardware_id = uniqueHwId();
-  const start = await request(app)
-    .post('/api/v1/pairing/start')
-    .send({ hardware_id, platform: 'router' });
+  const code = uniquePairingCodeForTest();
+
+  await request(app)
+    .post('/api/v1/pairing/register')
+    .send({ hardware_id, pairing_code: code, platform: 'router' });
+
   const claim = await request(app)
-    .post('/api/v1/pairing/claim')
+    .post('/api/v1/pairing/claim-by-code')
     .set('Authorization', `Bearer ${token}`)
-    .send({ code: start.body.code });
+    .send({ pairing_code: code });
   expect(claim.status).toBe(200);
-  const poll = await request(app)
-    .post('/api/v1/pairing/poll')
-    .send({ code: start.body.code, hardware_id });
-  return poll.body.api_key as string;
+
+  const status = await request(app).get(
+    `/api/v1/pairing/box-status/${hardware_id}`,
+  );
+  return status.body.api_key as string;
 }
 
 describe('resolver pulls Household policy regardless of source', () => {

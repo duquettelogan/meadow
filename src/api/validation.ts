@@ -147,6 +147,26 @@ export const AnalyzeBody = z
   })
   .strict();
 
+// ---------- Box network status ----------
+// Pushed by the box after each network-mode setup or retry. Used by
+// the dashboard to surface "DHCP active" / "conflict detected" /
+// lease counts in the Box Health panel.
+//
+// Loose-shape on purpose: the whole payload is stashed as JSONB so
+// extensions (lease list, gateway changes, dnsmasq error messages)
+// don't require a migration.
+export const BoxNetworkStatusBody = z
+  .object({
+    dhcp_active: z.boolean(),
+    conflict_detected: z.boolean(),
+    servers_seen: z.array(z.string().max(64)).max(20).optional(),
+    box_ip: z.string().max(64).optional().nullable(),
+    gateway_ip: z.string().max(64).optional().nullable(),
+    leases_count: z.number().int().nonnegative().optional(),
+    last_check_at: z.string().max(64).optional().nullable(),
+  })
+  .strict();
+
 // ---------- Heartbeat ----------
 // Box health snapshot. All fields optional so we can extend the contract
 // without breaking older boxes.
@@ -178,28 +198,23 @@ const pairingCode = z
   .max(9)
   .regex(/^[\d]{4}-?[\d]{4}$/, 'invalid pairing code (expected XXXX-XXXX)');
 
-export const PairingStartBody = z
+// Box-originated pairing flow (replaces /start, /claim, /poll).
+//
+// Box generates the code itself and POSTs /pairing/register with both
+// hardware_id + the code it picked. Parent reads the code off the box's
+// LAN web page (http://meadow.local) and POSTs /pairing/claim-by-code.
+// Box polls /pairing/box-status/:hardware_id for the API key.
+export const PairingRegisterBody = z
   .object({
     hardware_id: hardwareId,
-    platform,
+    pairing_code: pairingCode,
+    platform: platform.optional(),
   })
   .strict();
 
-// child_profile_id is now optional and ignored — pairing binds to the
-// family, not to a specific child. The field is left in the schema so
-// older clients (Base44 dashboards mid-rollout) don't get a 400 from
-// .strict(); they get accepted, the value is dropped on the server.
-export const PairingClaimBody = z
+export const ClaimByCodeBody = z
   .object({
-    code: pairingCode,
-    child_profile_id: uuid.optional(),
-  })
-  .strict();
-
-export const PairingPollBody = z
-  .object({
-    code: pairingCode,
-    hardware_id: hardwareId,
+    pairing_code: pairingCode,
   })
   .strict();
 

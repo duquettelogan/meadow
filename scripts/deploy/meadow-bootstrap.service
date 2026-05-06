@@ -6,7 +6,7 @@ Documentation=https://github.com/duquettelogan/meadow
 After=network-online.target time-sync.target
 Wants=network-online.target time-sync.target
 # meadow.service Requires + After this unit so the DNS server only
-# starts once /etc/meadow/state.json has a device_id.
+# starts once /etc/meadow/box.env has a device_id.
 
 [Service]
 Type=oneshot
@@ -17,15 +17,23 @@ Group=meadow
 # Working dir + state.
 WorkingDirectory=/opt/meadow
 Environment=NODE_ENV=production
-Environment=STATE_FILE=/etc/meadow/state.json
+Environment=BOX_ENV_FILE=/etc/meadow/box.env
+Environment=PAIRING_CODE_FILE=/var/lib/meadow/pairing-code
 EnvironmentFile=-/etc/meadow/bootstrap.env
 
 # Run via ts-node in dev; for prod, point this at the compiled JS instead.
 ExecStart=/usr/bin/env npx ts-node /opt/meadow/src/box/bootstrap.ts
 
-# /etc/meadow must exist and be writable by the meadow user.
-# install.sh creates it with mode 0700 owner meadow:meadow.
-ReadWritePaths=/etc/meadow
+# /etc/meadow must exist and be writable by the meadow user
+# (install.sh creates it with mode 0700 owner meadow:meadow).
+# /var/lib/meadow holds the box-generated pairing-code file (created
+# by install.sh so the unprivileged meadow user can write it).
+ReadWritePaths=/etc/meadow /var/lib/meadow
+
+# Bind port 80 for the LAN-facing pairing web page (http://meadow.local)
+# without running as root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
 # Hardening.
 NoNewPrivileges=true
