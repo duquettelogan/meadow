@@ -42,7 +42,7 @@
     "express-rate-limit": "^8.4.1",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.3",
-    "node-fetch": "^2.7.0",
+    "node-fetch": "^3.3.2",
     "openai": "^6.33.0",
     "pg": "^8.20.0",
     "redis": "^5.11.0",
