@@ -30,6 +30,24 @@ not after. Snapshot of what to do and the current status.
   consent" check will plug in (5.2 just promotes the gate from "email
   verified" to "VPC method completed").
 
+- **Resource deletion (DONE):** `DELETE /api/v1/children/:id` and
+  `DELETE /api/v1/devices/:id`. Both gated by
+  `requireParentAuth + requireVerifiedParent`. Cross-family delete
+  returns `403 forbidden` (deliberately indistinguishable from "doesn't
+  exist" to prevent enumeration). Cascade behavior set in migration 007:
+  - Child delete → `filter_policies` and `block_counters` go with it;
+    `devices.child_profile_id` SET NULL so devices survive as
+    unassigned; `audit_log` rows preserved
+  - Device delete → `api_keys` and `pairing_codes` cascade-deleted;
+    `audit_log` rows preserved; the corresponding hardware box's API
+    key stops working immediately
+
+  This covers the per-resource right-to-deletion that 5.4 asks for —
+  family-wide DELETE will be a thin wrapper around these.
+
+  Dashboard plumbing notes in `docs/dashboard-api-notes.md` for the
+  Base44 side.
+
 ## Phase 5 — Legal / Compliance
 
 ### 5.1 — Privacy lawyer (NOT STARTED)
@@ -76,10 +94,10 @@ not after. Snapshot of what to do and the current status.
 - Build to California's strictest standard
 - Offer rights-exercise UI to all users (data export, data deletion)
 - **Engineering implication:** GET /api/v1/families/me/export and
-  DELETE /api/v1/families/me endpoints. The DELETE needs careful CASCADE
-  thinking — we already CASCADE-delete child_profiles → block_counters
-  but families don't CASCADE-delete devices/parents. Design when lawyer
-  scope lands.
+  DELETE /api/v1/families/me endpoints. Per-resource deletion is
+  already in place — see "Resource deletion (DONE)" below — so the
+  family-level "delete my entire account" endpoint is mostly a
+  cascade audit + a single transaction wrapping it.
 
 ### 5.5 — Product liability insurance (NOT STARTED)
 

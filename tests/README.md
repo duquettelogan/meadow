@@ -62,3 +62,8 @@ Postgres and Redis must be running locally for integration tests.
   and POST /pairing/claim for unverified parents; login / /me /
   resend-verification stay open; /resend-verification idempotent for
   already-verified parents
+- Resource deletion: DELETE /children/:id and DELETE /devices/:id
+  (own-family 204, cross-family 403, filter_policies + block_counters
+  cascade, devices SET NULL on child delete, api_keys + pairing_codes
+  cascade on device delete, audit_log preserved + delete events
+  appended, requires verified parent)

@@ -32,9 +32,11 @@ export type AuditAction =
   // Resources
   | 'child.created'
   | 'child.policy.updated'
+  | 'child.deleted'
   | 'device.registered'
   | 'device.key.issued'
   | 'device.key.revoked'
+  | 'device.deleted'
   // Pairing
   | 'pairing.started'
   | 'pairing.claimed'

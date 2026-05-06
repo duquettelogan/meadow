@@ -248,6 +248,44 @@ app.patch(
   }
 );
 
+// Delete a child profile. Verified parent must own the child's family.
+// CASCADE behavior (set in migrate-007):
+//   - filter_policies row for this child:  CASCADE-deleted
+//   - block_counters rows for this child:  CASCADE-deleted (already)
+//   - devices.child_profile_id pointing here: SET NULL (devices stay
+//     in the family, become unassigned, parent can re-assign or delete)
+//   - audit_log rows about this child:     PRESERVED (no FK by design)
+app.delete(
+  '/api/v1/children/:childId',
+  requireParentAuth,
+  requireVerifiedParent,
+  async (req, res) => {
+    const childId = req.params.childId as string;
+    try {
+      const result = await db.query(
+        `DELETE FROM child_profiles
+         WHERE id = $1 AND family_id = $2
+         RETURNING id`,
+        [childId, req.parent!.family_id],
+      );
+      if (result.rows.length === 0) {
+        // Conflates "doesn't exist" and "not in your family" — same
+        // response prevents existence-probing across families.
+        res.status(403).json({ error: 'forbidden' });
+        return;
+      }
+      audit(req, 'child.deleted', {
+        target_kind: 'child_profile',
+        target_id: childId,
+      });
+      res.status(204).end();
+    } catch (err) {
+      console.error('child delete failed:', err);
+      res.status(500).json({ error: 'internal server error' });
+    }
+  },
+);
+
 // ---------- Devices ----------
 app.post(
   '/api/v1/devices/register',
@@ -330,6 +368,41 @@ app.get(
       res.status(500).json({ error: 'internal server error' });
     }
   }
+);
+
+// Delete a device. Verified parent must own the device's family.
+// CASCADE behavior (FKs set in migrate-003 / migrate-004):
+//   - api_keys for this device:        CASCADE-deleted
+//   - pairing_codes.device_id:         CASCADE-deleted
+//   - pairing_codes.api_key_id:        CASCADE-deleted
+//   - audit_log rows about this device: PRESERVED (no FK by design)
+app.delete(
+  '/api/v1/devices/:deviceId',
+  requireParentAuth,
+  requireVerifiedParent,
+  async (req, res) => {
+    const deviceId = req.params.deviceId as string;
+    try {
+      const result = await db.query(
+        `DELETE FROM devices
+         WHERE id = $1 AND family_id = $2
+         RETURNING id`,
+        [deviceId, req.parent!.family_id],
+      );
+      if (result.rows.length === 0) {
+        res.status(403).json({ error: 'forbidden' });
+        return;
+      }
+      audit(req, 'device.deleted', {
+        target_kind: 'device',
+        target_id: deviceId,
+      });
+      res.status(204).end();
+    } catch (err) {
+      console.error('device delete failed:', err);
+      res.status(500).json({ error: 'internal server error' });
+    }
+  },
 );
 
 // ---------- Heartbeat ----------
