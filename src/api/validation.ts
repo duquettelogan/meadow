@@ -271,6 +271,24 @@ export const DeleteAccountBody = z
   })
   .strict();
 
+// ---------- Co-parent invitations ----------
+//
+// The invite token is generated server-side as base64url(32 bytes) —
+// 43 chars, URL-safe. Reuse the recoveryToken shape so /accept-invite
+// rejects malformed tokens before hitting the DB.
+export const FamilyInviteBody = z
+  .object({
+    email,
+  })
+  .strict();
+
+export const FamilyInviteAcceptBody = z
+  .object({
+    token: recoveryToken,
+    password,
+  })
+  .strict();
+
 // ---------- Helpers ----------
 export type ZodIssueResponse = { error: string; details?: unknown };
 
