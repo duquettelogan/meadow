@@ -32,8 +32,8 @@ describe('email-verification gate', () => {
 
       // Hot patch fix/unblock-children-without-email-verify: adding
       // a kid's name is just metadata. The gate stays on
-      // /pairing/claim* (the truly sensitive action — binding a
-      // physical box to the family).
+      // /pairing/claim-by-code (the truly sensitive action — binding
+      // a physical box to the family).
       expect(r.status).toBe(201);
       expect(r.body.name).toBe('UngatedKid');
     });
@@ -59,57 +59,10 @@ describe('email-verification gate', () => {
     });
   });
 
-  describe('POST /api/v1/pairing/claim — STILL gated', () => {
-    it('returns 403 email_not_verified for unverified parent', async () => {
-      const email = uniqueEmail();
-      const sig = await signup(email);
-
-      const child = await request(app)
-        .post('/api/v1/children')
-        .set('Authorization', `Bearer ${sig.body.token}`)
-        .send({ name: 'PairKid' });
-      // /children no longer gated — this works without verification.
-      expect(child.status).toBe(201);
-
-      const start = await request(app)
-        .post('/api/v1/pairing/start')
-        .send({ hardware_id: uniqueHwId(), platform: 'router' });
-      expect(start.status).toBe(201);
-
-      // Parent is still unverified — claim must reject.
-      const claim = await request(app)
-        .post('/api/v1/pairing/claim')
-        .set('Authorization', `Bearer ${sig.body.token}`)
-        .send({ code: start.body.code, child_profile_id: child.body.id });
-
-      expect(claim.status).toBe(403);
-      expect(claim.body).toEqual({ error: 'email_not_verified' });
-    });
-
-    it('returns 200 for verified parent claiming a paired device', async () => {
-      const email = uniqueEmail();
-      const sig = await signup(email);
-      await verifyEmailFor(email);
-
-      const child = await request(app)
-        .post('/api/v1/children')
-        .set('Authorization', `Bearer ${sig.body.token}`)
-        .send({ name: 'PairKid' });
-      expect(child.status).toBe(201);
-
-      const start = await request(app)
-        .post('/api/v1/pairing/start')
-        .send({ hardware_id: uniqueHwId(), platform: 'router' });
-
-      const claim = await request(app)
-        .post('/api/v1/pairing/claim')
-        .set('Authorization', `Bearer ${sig.body.token}`)
-        .send({ code: start.body.code, child_profile_id: child.body.id });
-
-      expect(claim.status).toBe(200);
-    });
-  });
-
+  // The legacy /pairing/start + /pairing/claim flow was retired in the
+  // box-originated pairing refactor (see src/api/pairing-routes.ts —
+  // "Older /pairing/start ... flow has been removed"). The gate test
+  // for the surviving sensitive action lives in the next describe block.
   describe('POST /api/v1/pairing/claim-by-code — STILL gated', () => {
     it('returns 403 email_not_verified for unverified parent', async () => {
       const email = uniqueEmail();
