@@ -289,6 +289,19 @@ export const FamilyInviteAcceptBody = z
   })
   .strict();
 
+// ---------- Admin: invite codes ----------
+//
+// All fields optional — admin can mint a default single-use code with
+// just an empty body, or override max_uses / expires_in_days.
+export const AdminCreateInviteCodeBody = z
+  .object({
+    max_uses: z.number().int().positive().max(10_000).optional(),
+    // Days until the code expires. Omitted = never expires (NULL on
+    // the row). Capped at 365 to keep mint-and-forget noise bounded.
+    expires_in_days: z.number().int().positive().max(365).optional(),
+  })
+  .strict();
+
 // ---------- Helpers ----------
 export type ZodIssueResponse = { error: string; details?: unknown };
 
