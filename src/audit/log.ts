@@ -21,6 +21,7 @@ import { db } from '../db/connection';
 export type AuditAction =
   // Auth
   | 'parent.signup'
+  | 'parent.signup.rejected'
   | 'parent.login'
   | 'parent.login.failed'
   | 'parent.logout'

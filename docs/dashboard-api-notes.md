@@ -60,6 +60,23 @@ Delete a device.
   - `audit_log` rows about this device: PRESERVED
   - A new `audit_log` row with `action='device.deleted'` is appended
 
+### `POST /api/v1/auth/signup` (gate semantics changed)
+
+The endpoint shape is unchanged, but two server-side env vars now gate
+who can sign up:
+
+| `SIGNUP_ENABLED` | `SIGNUP_INVITE_CODE` | Behavior |
+|---|---|---|
+| `true` (default) | anything | Open. `invite_code` body field accepted but ignored. |
+| `false` / `0` | empty | Fully closed. Every request gets `403 signup_closed`. |
+| `false` / `0` | set | Invite-only. Body must include `invite_code` matching the env value, else `403 signup_closed`. |
+
+- **Body** (when invite-only): `{email, password, invite_code}`
+- **403 `{"error":"signup_closed"}`** is the new failure mode the
+  signup form needs to handle. Surface a "signup is currently closed
+  — enter your invite code" prompt that re-submits with the code.
+- The 5/IP/hour signup rate limit still applies on top.
+
 ### `POST /api/v1/auth/resend-verification`
 
 Re-send the email-verification email.

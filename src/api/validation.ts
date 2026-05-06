@@ -61,6 +61,11 @@ export const SignupBody = z
   .object({
     email,
     password,
+    // Optional invite code. Only consulted when SIGNUP_ENABLED=false
+    // (see auth-routes.ts). Always accepted in the body so closing
+    // signup mid-deploy doesn't start rejecting legit clients with
+    // a 400 — they get a 403 signup_closed they can act on.
+    invite_code: z.string().min(1).max(200).optional(),
   })
   .strict();
 

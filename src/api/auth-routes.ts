@@ -28,6 +28,7 @@ import {
   passwordResetLimiter,
 } from './rate-limits';
 import { audit } from '../audit/log';
+import { safeEqual } from '../auth/keys';
 import {
   sendVerificationEmail,
   sendPasswordResetEmail,
@@ -44,6 +45,43 @@ function newToken(): string {
 }
 
 /**
+ * Whether public signup is open. Read at request time so operators can
+ * flip the env var via `fly secrets set` without a full restart cycle
+ * picking up stale module-load values.
+ *
+ * Default: true (open signup). Disabled when SIGNUP_ENABLED is exactly
+ * "false" or "0" — anything else (unset, "true", "1", "yes", etc.)
+ * keeps signup open. Strict matching avoids "did the operator typo it
+ * to 'False' and accidentally disable signup?" surprises.
+ */
+function isSignupEnabled(): boolean {
+  const v = process.env.SIGNUP_ENABLED;
+  if (v === undefined) return true;
+  return v !== 'false' && v !== '0';
+}
+
+function expectedInviteCode(): string {
+  return (process.env.SIGNUP_INVITE_CODE || '').trim();
+}
+
+/**
+ * Returns true if the signup request is allowed under the current
+ * SIGNUP_ENABLED / SIGNUP_INVITE_CODE policy.
+ *
+ * Truth table (SIGNUP_ENABLED, SIGNUP_INVITE_CODE):
+ *   (true,  *)        → allowed (invite_code field ignored either way)
+ *   (false, "")       → all signups rejected
+ *   (false, "<code>") → only requests where body.invite_code === <code>
+ */
+function isSignupAllowed(suppliedInvite?: string): boolean {
+  if (isSignupEnabled()) return true;
+  const expected = expectedInviteCode();
+  if (!expected) return false;
+  if (typeof suppliedInvite !== 'string') return false;
+  return safeEqual(suppliedInvite, expected);
+}
+
+/**
  * Signup: creates a family and the first parent, returns a JWT.
  * Also issues an email-verification token and best-effort sends the
  * verification email. Account is usable immediately — verification
@@ -54,7 +92,26 @@ router.post(
   signupLimiter,
   validateBody(SignupBody),
   async (req: Request, res: Response) => {
-    const { email, password } = req.body as { email: string; password: string };
+    const { email, password, invite_code } = req.body as {
+      email: string;
+      password: string;
+      invite_code?: string;
+    };
+
+    // Signup gate: closed-deploy / invite-only mode. Run BEFORE the
+    // expensive bcrypt hash + DB transaction so a closed deploy can
+    // shed signup spam cheaply. The signupLimiter (5/IP/hour) is the
+    // outer brute-force ceiling; safeEqual on the invite code is
+    // belt-and-braces timing protection on top of that.
+    if (!isSignupAllowed(invite_code)) {
+      audit(req, 'parent.signup.rejected', {
+        metadata: {
+          reason: isSignupEnabled() ? 'invalid_invite' : 'signup_closed',
+        },
+      });
+      res.status(403).json({ error: 'signup_closed' });
+      return;
+    }
 
     const verificationToken = newToken();
     const client = await db.connect();
