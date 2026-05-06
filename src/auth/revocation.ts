@@ -66,15 +66,26 @@ export async function revokeJti(jti: string, ttlSeconds: number): Promise<void> 
  * Set a "minimum issued-at" floor for a parent. Any JWT issued before
  * this timestamp is rejected. Used after password change / reset to
  * invalidate all existing sessions in one stroke.
+ *
+ * The floor is set to `floor(now/1000) + 1` so it's strictly greater
+ * than any token's iat that exists at the moment of revocation. JWT iat
+ * has 1-second resolution, so without the +1 bump, a token issued in
+ * the same wall-clock second as the revocation would NOT be rejected by
+ * the `floor > iat` check (they'd be equal). The +1 bump means anything
+ * with iat <= now is correctly rejected. Trade-off: a re-login that
+ * lands in the same physical second as the revocation gets rejected
+ * once and the user has to retry — acceptable for the change-password
+ * UX where the dashboard navigates to login first.
  */
 export async function revokeAllForParent(parentId: string): Promise<void> {
   if (!parentId) return;
   try {
     const c = await ensureConnected();
+    const floor = Math.floor(Date.now() / 1000) + 1;
     // 30-day TTL — anything older than the longest plausible session.
     await c.set(
       `${PREFIX_PARENT_FLOOR}${parentId}`,
-      String(Math.floor(Date.now() / 1000)),
+      String(floor),
       { EX: 60 * 60 * 24 * 30 },
     );
   } catch (err) {

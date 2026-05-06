@@ -156,22 +156,26 @@ describe('pairing flow', () => {
     const start = await request(app)
       .post('/api/v1/pairing/start')
       .send({ hardware_id, platform: 'router' });
+    expect(start.status, JSON.stringify(start.body)).toBe(201);
     const code = start.body.code;
 
-    await request(app)
+    const claim = await request(app)
       .post('/api/v1/pairing/claim')
       .set('Authorization', `Bearer ${token}`)
       .send({ code, child_profile_id: childId });
+    expect(claim.status, JSON.stringify(claim.body)).toBe(200);
 
     const poll = await request(app)
       .post('/api/v1/pairing/poll')
       .send({ code, hardware_id });
+    expect(poll.status, JSON.stringify(poll.body)).toBe(200);
     const apiKey = poll.body.api_key;
+    expect(apiKey).toMatch(/^mk_[a-f0-9]+$/);
 
     const resolve = await request(app)
       .post('/api/v1/resolve')
       .set('Authorization', `Bearer ${apiKey}`)
       .send({ domain: 'example.com' });
-    expect([200, 201].includes(resolve.status)).toBe(true);
+    expect(resolve.status, JSON.stringify(resolve.body)).toBe(200);
   });
 });

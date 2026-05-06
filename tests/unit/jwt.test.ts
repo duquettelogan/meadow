@@ -9,7 +9,11 @@ describe('jwt', () => {
     };
     const token = signParentToken(claims);
     const decoded = verifyParentToken(token);
-    expect(decoded).toEqual(claims);
+    // Decoded includes jti/iat/exp on top of the input claims (Phase 4.3).
+    expect(decoded).toMatchObject(claims);
+    expect(typeof decoded?.jti).toBe('string');
+    expect(typeof decoded?.iat).toBe('number');
+    expect(typeof decoded?.exp).toBe('number');
   });
 
   it('returns null for a token with the wrong signature', () => {
@@ -28,15 +32,15 @@ describe('jwt', () => {
     expect(verifyParentToken('garbage')).toBeNull();
   });
 
-  it('two tokens for the same claims differ (iat)', async () => {
+  it('two tokens for the same claims differ (jti)', () => {
     const claims = {
       parent_id: '11111111-1111-1111-1111-111111111111',
       family_id: '22222222-2222-2222-2222-222222222222',
     };
     const a = signParentToken(claims);
-    // Wait a second so iat differs.
-    await new Promise((r) => setTimeout(r, 1100));
     const b = signParentToken(claims);
+    // jti is randomized per call, so back-to-back signs produce
+    // different tokens even within the same second.
     expect(a).not.toBe(b);
   });
 });
