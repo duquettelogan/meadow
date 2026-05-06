@@ -136,6 +136,21 @@ router.post(
       );
       const parent = parentResult.rows[0];
 
+      // Bootstrap the family with a Household child + default policy.
+      // The Household child is the single source of filter rules in v1
+      // and is hidden from GET /children. See migration 008 + the
+      // /api/v1/filter-policy endpoint in api/server.ts.
+      const householdResult = await client.query(
+        `INSERT INTO child_profiles (family_id, name, tier, is_household)
+         VALUES ($1, 'Household', 'standard', true)
+         RETURNING id`,
+        [family.id]
+      );
+      await client.query(
+        'INSERT INTO filter_policies (child_profile_id) VALUES ($1)',
+        [householdResult.rows[0].id]
+      );
+
       await client.query('COMMIT');
 
       const token = signParentToken({

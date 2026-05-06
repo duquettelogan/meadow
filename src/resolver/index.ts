@@ -80,12 +80,17 @@ export async function resolve(
     };
   }
 
-  // Step 1: device + filter policy.
+  // Step 1: device + family Household policy. v1 always uses the
+  // family's Household child's filter_policies row, regardless of
+  // whether d.child_profile_id is set (that's a cosmetic dashboard
+  // assignment, not an enforcement signal).
   const deviceResult = await db.query(
-    `SELECT d.id as device_id, d.child_profile_id,
+    `SELECT d.id as device_id, hh.id AS household_child_id,
             p.blocked_categories, p.blocked_domains, p.allowed_domains
      FROM devices d
-     JOIN filter_policies p ON p.child_profile_id = d.child_profile_id
+     JOIN child_profiles hh
+       ON hh.family_id = d.family_id AND hh.is_household = true
+     JOIN filter_policies p ON p.child_profile_id = hh.id
      WHERE d.device_token = $1`,
     [deviceToken]
   );
@@ -101,7 +106,7 @@ export async function resolve(
   }
 
   const profile = deviceResult.rows[0];
-  const childProfileId: string = profile.child_profile_id;
+  const childProfileId: string = profile.household_child_id;
 
   // Step 2: parent allowlist.
   const allowedDomains: string[] = profile.allowed_domains || [];

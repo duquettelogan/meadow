@@ -2,19 +2,17 @@
  * Box runtime context.
  *
  * On startup, reads /etc/meadow/state.json (written by the bootstrap
- * script) and resolves the box's device_id to a child_profile_id. The
- * UDP DNS server uses this to attribute block counts — every query
- * served by the box's network-level DNS attributes to the single child
- * the box is paired to.
+ * script) and resolves the box's device_id to the family it's paired
+ * to + the family's Household child profile id.
  *
- * v1 assumption: one box → one child profile. Multi-child households
- * use device-level resolve (per-device API keys) instead. If we add
- * box-level multi-child later, this module becomes a per-source-IP
- * lookup, not a single cached profile.
+ * In v1, DNS resolution is family-scoped (not per-child), so the
+ * resolver only needs the family's Household policy. The Household
+ * child id is pre-resolved here and used for counter attribution on
+ * the UDP path so we don't have to JOIN every blocked query.
  *
- * The api_key is exposed alongside the IDs because the heartbeat module
- * needs it to authenticate POSTs to /api/v1/devices/heartbeat. It is
- * NEVER logged or returned outside the box process.
+ * The api_key is exposed alongside the IDs because the heartbeat +
+ * discovery modules need it to authenticate POSTs back to the API.
+ * It is NEVER logged or returned outside the box process.
  */
 
 import * as fs from 'fs';
@@ -30,7 +28,8 @@ interface PersistedState {
 
 export interface BoxContext {
   device_id: string;
-  child_profile_id: string | null;
+  family_id: string;
+  household_child_id: string | null;
   api_key: string | null;
 }
 
@@ -63,13 +62,17 @@ export async function loadBoxContext(): Promise<BoxContext | null> {
     return null;
   }
 
-  // Resolve the device_id to its child_profile_id. The box's device row
-  // is created during pairing, so this should always exist for a paired
-  // box. If it doesn't, something blew up — log loudly and run unpaired
-  // so the DNS path still works (just without counters).
+  // Resolve device → family → Household child in one query. Household
+  // is created at signup (and back-filled by migration 008 for older
+  // families) so the LEFT JOIN should always hit, but we tolerate
+  // null household_child_id and skip counter writes if so.
   try {
     const result = await db.query(
-      'SELECT child_profile_id FROM devices WHERE id = $1',
+      `SELECT d.family_id, hh.id AS household_child_id
+       FROM devices d
+       LEFT JOIN child_profiles hh
+         ON hh.family_id = d.family_id AND hh.is_household = true
+       WHERE d.id = $1`,
       [state.device_id],
     );
     if (result.rows.length === 0) {
@@ -80,15 +83,16 @@ export async function loadBoxContext(): Promise<BoxContext | null> {
     }
     cached = {
       device_id: state.device_id,
-      child_profile_id: result.rows[0].child_profile_id ?? null,
+      family_id: result.rows[0].family_id,
+      household_child_id: result.rows[0].household_child_id ?? null,
       api_key: state.api_key ?? null,
     };
     console.log(
-      `[box] context loaded: device=${cached.device_id} child=${cached.child_profile_id ?? 'unassigned'}`,
+      `[box] context loaded: device=${cached.device_id} family=${cached.family_id} household=${cached.household_child_id ?? 'missing'}`,
     );
     return cached;
   } catch (err) {
-    console.error('[box] failed to resolve device → child:', err);
+    console.error('[box] failed to resolve device → family:', err);
     return null;
   }
 }
