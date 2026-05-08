@@ -27,9 +27,14 @@ import {
   DiscoveredDeviceBody,
   UpdateDeviceBody,
   BoxNetworkStatusBody,
+  UpdateAccountBody,
+  DeleteAccountBody,
 } from './validation';
 import { resolveLimiter, defaultLimiter } from './rate-limits';
 import { audit } from '../audit/log';
+import { verifyPassword } from '../auth/passwords';
+import { revokeAllForParent } from '../auth/revocation';
+import { sendVerificationEmail } from '../email';
 
 const app = express();
 
@@ -100,7 +105,7 @@ app.use('/api/v1', defaultLimiter);
 app.get('/api/v1/families/me', requireParentAuth, async (req, res) => {
   try {
     const result = await db.query(
-      'SELECT id, email, created_at FROM families WHERE id = $1',
+      'SELECT id, email, name, created_at FROM families WHERE id = $1',
       [req.parent!.family_id]
     );
     if (result.rows.length === 0) {
@@ -113,6 +118,259 @@ app.get('/api/v1/families/me', requireParentAuth, async (req, res) => {
     res.status(500).json({ error: 'internal server error' });
   }
 });
+
+// ---------- Account management ----------
+//
+// PATCH /api/v1/account — update the calling parent's account fields.
+//
+//   body: { family_name?, email? }   (at least one required)
+//
+// family_name persists on families.name (denormalized for the
+// dashboard's "The Duquette Family" header). email updates the
+// authenticated parent's email AND clears email_verified_at, then
+// fires a verification email so the new address has to be re-proven
+// before any verified-only action (pairing claim, filter-policy PUT)
+// works again. families.email is also resynced when this parent is
+// the founding parent (i.e. their old email matches families.email)
+// so the global UNIQUE constraint isn't left holding a stale value.
+app.patch(
+  '/api/v1/account',
+  requireParentAuth,
+  validateBody(UpdateAccountBody),
+  async (req, res) => {
+    const { family_name, email } = req.body as {
+      family_name?: string;
+      email?: string;
+    };
+    const parentId = req.parent!.parent_id;
+    const familyId = req.parent!.family_id;
+
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+
+      if (family_name !== undefined) {
+        await client.query(
+          'UPDATE families SET name = $1 WHERE id = $2',
+          [family_name, familyId],
+        );
+      }
+
+      let verificationToken: string | null = null;
+      let newEmail: string | null = null;
+      if (email !== undefined) {
+        // Existing parent row — we need the old email to decide
+        // whether to resync families.email below.
+        const cur = await client.query(
+          'SELECT email FROM parents WHERE id = $1',
+          [parentId],
+        );
+        if (cur.rows.length === 0) {
+          await client.query('ROLLBACK');
+          res.status(404).json({ error: 'parent not found' });
+          return;
+        }
+        const oldEmail = cur.rows[0].email as string;
+
+        // Email collisions across parents are caught by the parents
+        // UNIQUE constraint — return 409 instead of letting Postgres
+        // surface the raw error.
+        verificationToken = crypto.randomBytes(32).toString('base64url');
+        try {
+          await client.query(
+            `UPDATE parents SET
+               email = $1,
+               email_verified_at = NULL,
+               email_verification_token = $2,
+               email_verification_expires_at = NOW() + INTERVAL '24 hours'
+             WHERE id = $3`,
+            [email, verificationToken, parentId],
+          );
+        } catch (err: any) {
+          if (err.code === '23505') {
+            await client.query('ROLLBACK');
+            res.status(409).json({ error: 'email already registered' });
+            return;
+          }
+          throw err;
+        }
+
+        // Keep families.email in sync when the founding parent rotates
+        // their email; co-parents (when invite flow lands) won't trigger
+        // this branch because their email never matched families.email.
+        const fam = await client.query(
+          'SELECT email FROM families WHERE id = $1',
+          [familyId],
+        );
+        if (
+          fam.rows.length === 1 &&
+          fam.rows[0].email.toLowerCase() === oldEmail.toLowerCase()
+        ) {
+          try {
+            await client.query(
+              'UPDATE families SET email = $1 WHERE id = $2',
+              [email, familyId],
+            );
+          } catch (err: any) {
+            if (err.code === '23505') {
+              await client.query('ROLLBACK');
+              res.status(409).json({ error: 'email already registered' });
+              return;
+            }
+            throw err;
+          }
+        }
+        newEmail = email;
+      }
+
+      await client.query('COMMIT');
+
+      // Outside the transaction: best-effort verification email.
+      if (newEmail && verificationToken) {
+        sendVerificationEmail(newEmail, verificationToken).catch(() => {});
+      }
+
+      audit(req, 'parent.account.updated', {
+        target_kind: 'parent',
+        target_id: parentId,
+        metadata: {
+          fields_changed: Object.keys(req.body ?? {}),
+        },
+      });
+
+      // Re-read the canonical state so the client doesn't have to
+      // reconstruct it from the patch body.
+      const out = await db.query(
+        `SELECT p.id AS parent_id, p.email, p.email_verified_at,
+                f.id AS family_id, f.email AS family_email, f.name AS family_name
+         FROM parents p
+         JOIN families f ON f.id = p.family_id
+         WHERE p.id = $1`,
+        [parentId],
+      );
+      res.json(out.rows[0]);
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      console.error('account patch failed:', err);
+      res.status(500).json({ error: 'internal server error' });
+    } finally {
+      client.release();
+    }
+  },
+);
+
+// DELETE /api/v1/account — hard-delete the entire family.
+//
+//   body: { password_confirmation }
+//
+// Requires the calling parent's password. Tears down the family and
+// every dependent row (children, devices, api_keys, pairing_codes,
+// filter_policies, block_counters, parents). audit_log rows are
+// preserved (denormalized, no FK — see migrate-006 for the contract).
+//
+// Same manual-cleanup posture as DELETE /children + /devices: explicit
+// deletes inside a transaction so the prod schema's missing CASCADEs
+// can't break us.
+app.delete(
+  '/api/v1/account',
+  requireParentAuth,
+  validateBody(DeleteAccountBody),
+  async (req, res) => {
+    const { password_confirmation } = req.body as {
+      password_confirmation: string;
+    };
+    const parentId = req.parent!.parent_id;
+    const familyId = req.parent!.family_id;
+
+    const client = await db.connect();
+    try {
+      const lookup = await client.query(
+        'SELECT password_hash FROM parents WHERE id = $1',
+        [parentId],
+      );
+      if (lookup.rows.length === 0) {
+        res.status(404).json({ error: 'parent not found' });
+        return;
+      }
+      const ok = await verifyPassword(
+        password_confirmation,
+        lookup.rows[0].password_hash,
+      );
+      if (!ok) {
+        res.status(401).json({ error: 'password incorrect' });
+        return;
+      }
+
+      await client.query('BEGIN');
+
+      // Order: leaf-first, working up to families. block_counters and
+      // api_keys cascade, but everything else has a NO ACTION FK so we
+      // do them by hand.
+      await client.query(
+        `DELETE FROM pairing_codes
+         WHERE family_id = $1
+            OR device_id IN (SELECT id FROM devices WHERE family_id = $1)
+            OR api_key_id IN (
+              SELECT k.id FROM api_keys k
+              JOIN devices d ON d.id = k.device_id
+              WHERE d.family_id = $1
+            )`,
+        [familyId],
+      );
+      await client.query(
+        `DELETE FROM api_keys WHERE device_id IN (
+           SELECT id FROM devices WHERE family_id = $1
+         )`,
+        [familyId],
+      );
+      await client.query(
+        'DELETE FROM devices WHERE family_id = $1',
+        [familyId],
+      );
+      await client.query(
+        `DELETE FROM block_counters WHERE child_profile_id IN (
+           SELECT id FROM child_profiles WHERE family_id = $1
+         )`,
+        [familyId],
+      );
+      await client.query(
+        `DELETE FROM filter_policies WHERE child_profile_id IN (
+           SELECT id FROM child_profiles WHERE family_id = $1
+         )`,
+        [familyId],
+      );
+      await client.query(
+        'DELETE FROM child_profiles WHERE family_id = $1',
+        [familyId],
+      );
+      // parents have ON DELETE CASCADE on family_id, so deleting the
+      // family wipes them. Audit row is appended after COMMIT.
+      await client.query('DELETE FROM families WHERE id = $1', [familyId]);
+
+      await client.query('COMMIT');
+
+      audit(req, 'family.deleted', {
+        target_kind: 'family',
+        target_id: familyId,
+        metadata: { parent_id: parentId },
+      });
+
+      // Revoke every JWT for this parent immediately so the dashboard
+      // stops accepting their tokens (other co-parents would also have
+      // been wiped above; their tokens become invalid via the parents
+      // FK cascade taking out their parent row).
+      revokeAllForParent(parentId).catch(() => {});
+
+      res.status(204).end();
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      console.error('account delete failed:', err);
+      res.status(500).json({ error: 'internal server error' });
+    } finally {
+      client.release();
+    }
+  },
+);
 
 // ---------- Children ----------
 // Adding a child profile is just metadata — name + tier — and doesn't

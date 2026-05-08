@@ -30,6 +30,8 @@ export type AuditAction =
   | 'parent.password.reset.completed'
   | 'parent.email.verification.requested'
   | 'parent.email.verified'
+  | 'parent.account.updated'
+  | 'family.deleted'
   // Resources
   | 'child.created'
   | 'child.policy.updated'

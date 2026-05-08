@@ -247,6 +247,30 @@ export const ChangePasswordBody = z
   })
   .strict();
 
+// ---------- Account management ----------
+//
+// PATCH body — at least one of family_name / email must be present
+// (refine ensures empty {} doesn't no-op silently). family_name is a
+// loose display string; email goes through the standard email zod.
+export const UpdateAccountBody = z
+  .object({
+    family_name: z.string().min(1).max(120).trim().optional(),
+    email: email.optional(),
+  })
+  .strict()
+  .refine((b) => b.family_name !== undefined || b.email !== undefined, {
+    message: 'request must include at least one of: family_name, email',
+  });
+
+export const DeleteAccountBody = z
+  .object({
+    // Looser min than the signup password rule — older accounts may
+    // still have shorter passwords, and we just need to verify, not
+    // re-validate strength.
+    password_confirmation: z.string().min(1).max(200),
+  })
+  .strict();
+
 // ---------- Helpers ----------
 export type ZodIssueResponse = { error: string; details?: unknown };
 
