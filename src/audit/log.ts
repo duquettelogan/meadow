@@ -35,6 +35,7 @@ export type AuditAction =
   | 'parent.invite.created'
   | 'parent.invite.accepted'
   | 'parent.removed'
+  | 'admin.invite_code.created'
   // Resources
   | 'child.created'
   | 'child.policy.updated'

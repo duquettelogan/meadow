@@ -28,7 +28,6 @@ import {
   passwordResetLimiter,
 } from './rate-limits';
 import { audit } from '../audit/log';
-import { safeEqual } from '../auth/keys';
 import {
   sendVerificationEmail,
   sendPasswordResetEmail,
@@ -79,26 +78,16 @@ function isSignupEnabled(): boolean {
   return v !== 'false' && v !== '0';
 }
 
-function expectedInviteCode(): string {
-  return (process.env.SIGNUP_INVITE_CODE || '').trim();
-}
-
 /**
- * Returns true if the signup request is allowed under the current
- * SIGNUP_ENABLED / SIGNUP_INVITE_CODE policy.
+ * When closed-deploy mode is on (SIGNUP_ENABLED=false), invite_code
+ * validation goes against the invite_codes table — admin-managed,
+ * single-use by default, with optional expiry. The legacy
+ * SIGNUP_INVITE_CODE env-var match path was removed; migrate-013
+ * seeds the env value into invite_codes at migration time so existing
+ * alpha signups keep working through the cutover.
  *
- * Truth table (SIGNUP_ENABLED, SIGNUP_INVITE_CODE):
- *   (true,  *)        → allowed (invite_code field ignored either way)
- *   (false, "")       → all signups rejected
- *   (false, "<code>") → only requests where body.invite_code === <code>
+ * See server.ts /api/v1/admin/invite-codes for code minting + listing.
  */
-function isSignupAllowed(suppliedInvite?: string): boolean {
-  if (isSignupEnabled()) return true;
-  const expected = expectedInviteCode();
-  if (!expected) return false;
-  if (typeof suppliedInvite !== 'string') return false;
-  return safeEqual(suppliedInvite, expected);
-}
 
 /**
  * Signup: creates a family and the first parent, returns a JWT.
@@ -117,16 +106,19 @@ router.post(
       invite_code?: string;
     };
 
-    // Signup gate: closed-deploy / invite-only mode. Run BEFORE the
-    // expensive bcrypt hash + DB transaction so a closed deploy can
-    // shed signup spam cheaply. The signupLimiter (5/IP/hour) is the
-    // outer brute-force ceiling; safeEqual on the invite code is
-    // belt-and-braces timing protection on top of that.
-    if (!isSignupAllowed(invite_code)) {
+    // Signup gate: closed-deploy / invite-only mode.
+    //
+    // - Open mode (SIGNUP_ENABLED unset / "true"): invite_code is
+    //   ignored, signup proceeds.
+    // - Closed mode (SIGNUP_ENABLED=false/0): caller MUST supply an
+    //   invite_code that resolves to an active row in invite_codes.
+    //   Cheap rejection paths (no code at all) run before bcrypt +
+    //   the DB transaction so a closed deploy can shed signup spam
+    //   without paying the hash cost.
+    const closedMode = !isSignupEnabled();
+    if (closedMode && !invite_code) {
       audit(req, 'parent.signup.rejected', {
-        metadata: {
-          reason: isSignupEnabled() ? 'invalid_invite' : 'signup_closed',
-        },
+        metadata: { reason: 'signup_closed' },
       });
       res.status(403).json({ error: 'signup_closed' });
       return;
@@ -136,6 +128,34 @@ router.post(
     const client = await db.connect();
     try {
       await client.query('BEGIN');
+
+      // In closed mode, claim the invite_codes row inside the same
+      // transaction as the family + parent inserts. SELECT FOR UPDATE
+      // serializes concurrent claims of the same code so a single-use
+      // code can't get used twice via simultaneous requests.
+      let inviteCodeRow:
+        | { code: string; max_uses: number; uses_count: number }
+        | null = null;
+      if (closedMode) {
+        const lookup = await client.query(
+          `SELECT code, max_uses, uses_count, expires_at
+           FROM invite_codes
+           WHERE code = $1
+             AND (expires_at IS NULL OR expires_at > NOW())
+             AND uses_count < max_uses
+           FOR UPDATE`,
+          [invite_code],
+        );
+        if (lookup.rows.length === 0) {
+          await client.query('ROLLBACK');
+          audit(req, 'parent.signup.rejected', {
+            metadata: { reason: 'invalid_invite' },
+          });
+          res.status(403).json({ error: 'signup_closed' });
+          return;
+        }
+        inviteCodeRow = lookup.rows[0];
+      }
 
       const familyResult = await client.query(
         'INSERT INTO families (email) VALUES ($1) RETURNING id, email, created_at',
@@ -179,6 +199,21 @@ router.post(
           JSON.stringify(DEFAULT_HOUSEHOLD_BLOCKED_CATEGORIES),
         ]
       );
+
+      // Consume the invite code now that we have the new parent_id.
+      // Increment uses_count; stamp used_by_parent_id and used_at on
+      // first consumption so multi-use codes preserve the founding
+      // claimant. Subsequent consumers just bump uses_count.
+      if (inviteCodeRow) {
+        await client.query(
+          `UPDATE invite_codes SET
+             uses_count = uses_count + 1,
+             used_at    = COALESCE(used_at, NOW()),
+             used_by_parent_id = COALESCE(used_by_parent_id, $1)
+           WHERE code = $2`,
+          [parent.id, inviteCodeRow.code],
+        );
+      }
 
       await client.query('COMMIT');
 

@@ -31,6 +31,7 @@ import {
   DeleteAccountBody,
   FamilyInviteBody,
   FamilyInviteAcceptBody,
+  AdminCreateInviteCodeBody,
 } from './validation';
 import { resolveLimiter, defaultLimiter } from './rate-limits';
 import { audit } from '../audit/log';
@@ -103,6 +104,126 @@ app.use('/api/v1/pairing', pairingRouter);
 
 // Default rate limit for everything else under /api/v1.
 app.use('/api/v1', defaultLimiter);
+
+// ---------- Admin ----------
+//
+// Admin gate: env IS_ADMIN_EMAIL is a comma-separated allowlist of
+// parent email addresses. The middleware reads it at request time so
+// `fly secrets set IS_ADMIN_EMAIL=...` takes effect without a restart.
+//
+// Lookup pattern matches requireVerifiedParent — small DB hit per
+// call, but admin routes aren't hot. If usage grows we can cache
+// admin status on the JWT claims set.
+async function requireAdminParent(
+  req: import('express').Request,
+  res: import('express').Response,
+  next: import('express').NextFunction,
+): Promise<void> {
+  if (!req.parent) {
+    res.status(401).json({ error: 'auth required' });
+    return;
+  }
+  const allowlist = (process.env.IS_ADMIN_EMAIL ?? '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  if (allowlist.length === 0) {
+    res.status(403).json({ error: 'admin disabled' });
+    return;
+  }
+  try {
+    const lookup = await db.query(
+      'SELECT email FROM parents WHERE id = $1',
+      [req.parent.parent_id],
+    );
+    const callerEmail = lookup.rows[0]?.email?.toLowerCase();
+    if (!callerEmail || !allowlist.includes(callerEmail)) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    next();
+  } catch (err) {
+    console.error('admin gate failed:', err);
+    res.status(500).json({ error: 'internal server error' });
+  }
+}
+
+// POST /api/v1/admin/invite-codes — mint a new invite code.
+//   body: { max_uses?, expires_in_days? }
+// Code is 16 random hex chars (~10^19 combinations) — enough entropy
+// for a single-use signup gate in a closed deploy.
+app.post(
+  '/api/v1/admin/invite-codes',
+  requireParentAuth,
+  requireAdminParent,
+  validateBody(AdminCreateInviteCodeBody),
+  async (req, res) => {
+    const { max_uses, expires_in_days } = req.body as {
+      max_uses?: number;
+      expires_in_days?: number;
+    };
+    try {
+      const code = crypto.randomBytes(8).toString('hex');
+      const inserted = await db.query(
+        `INSERT INTO invite_codes
+           (code, created_by_parent_id, max_uses, expires_at)
+         VALUES ($1, $2, $3,
+                 ${expires_in_days ? `NOW() + ($4 || ' days')::interval` : `NULL`})
+         RETURNING code, created_at, expires_at, max_uses`,
+        expires_in_days
+          ? [code, req.parent!.parent_id, max_uses ?? 1, String(expires_in_days)]
+          : [code, req.parent!.parent_id, max_uses ?? 1],
+      );
+      audit(req, 'admin.invite_code.created', {
+        target_kind: 'invite_code',
+        target_id: code,
+        metadata: {
+          max_uses: inserted.rows[0].max_uses,
+          expires_in_days: expires_in_days ?? null,
+        },
+      });
+      res.status(201).json(inserted.rows[0]);
+    } catch (err) {
+      console.error('admin invite-code create failed:', err);
+      res.status(500).json({ error: 'internal server error' });
+    }
+  },
+);
+
+// GET /api/v1/admin/invite-codes — list every code with derived status.
+//
+//   status: 'expired' | 'used' | 'active'
+//
+// "used" means uses_count >= max_uses. "expired" wins over both if the
+// expires_at fence has been crossed (an expired code is no longer
+// useful even if uses are left). "active" otherwise.
+app.get(
+  '/api/v1/admin/invite-codes',
+  requireParentAuth,
+  requireAdminParent,
+  async (_req, res) => {
+    try {
+      const result = await db.query(
+        `SELECT code, created_by_parent_id, created_at,
+                expires_at, used_at, used_by_parent_id,
+                max_uses, uses_count,
+                CASE
+                  WHEN expires_at IS NOT NULL AND expires_at < NOW()
+                    THEN 'expired'
+                  WHEN uses_count >= max_uses
+                    THEN 'used'
+                  ELSE 'active'
+                END AS status
+         FROM invite_codes
+         ORDER BY created_at DESC`,
+      );
+      res.json({ codes: result.rows });
+    } catch (err) {
+      console.error('admin invite-code list failed:', err);
+      res.status(500).json({ error: 'internal server error' });
+    }
+  },
+);
 
 // ---------- Family ----------
 app.get('/api/v1/families/me', requireParentAuth, async (req, res) => {
