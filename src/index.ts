@@ -5,6 +5,10 @@ import { startScheduler, stopScheduler } from './intel/updater';
 import { startDnsServer, stopDnsServer } from './dns/udp-server';
 import { startHeartbeat, stopHeartbeat } from './box/heartbeat';
 import { startDiscovery, stopDiscovery } from './box/discover';
+import {
+  startOfflineAlertWatcher,
+  stopOfflineAlertWatcher,
+} from './workers/box-offline-watcher';
 import { app } from './api/server';
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -40,6 +44,10 @@ async function main() {
   // gating as heartbeat: no-op without a paired state.json + api_key.
   startDiscovery();
 
+  // Server-side: hourly silent-box check that emails the family when
+  // a box has had no heartbeat in >24h. No-op unless OFFLINE_ALERTS_DISABLED=1.
+  startOfflineAlertWatcher();
+
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Meadow API running on http://localhost:${PORT}`);
   });
@@ -49,6 +57,7 @@ async function main() {
     stopScheduler();
     stopHeartbeat();
     stopDiscovery();
+    stopOfflineAlertWatcher();
     await stopDnsServer().catch(() => {});
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(1), 5000).unref();

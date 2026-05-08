@@ -39,6 +39,10 @@ process.env.DISABLE_HEARTBEAT = '1';
 // Same posture for the LAN discovery loop.
 process.env.DISABLE_DISCOVERY = '1';
 
+// And the silent-box offline alert watcher — tests drive
+// runOfflineAlertCheckOnce() directly when they need to.
+process.env.OFFLINE_ALERTS_DISABLED = '1';
+
 // Close the connection pool + Redis client after all tests so the
 // process can exit cleanly.
 afterAll(async () => {

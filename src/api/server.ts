@@ -979,10 +979,15 @@ app.post(
   validateBody(HeartbeatBody),
   async (req, res) => {
     try {
+      // Reset offline_alert_sent_at on every heartbeat — this is the
+      // "the box is back" signal that lets the next 24h-silent stretch
+      // trigger a fresh email instead of being suppressed forever after
+      // the first alert. See src/workers/box-offline-watcher.ts.
       await db.query(
         `UPDATE devices
          SET last_seen = NOW(),
-             last_health_payload = $2::jsonb
+             last_health_payload = $2::jsonb,
+             offline_alert_sent_at = NULL
          WHERE id = $1`,
         [req.device!.device_id, JSON.stringify(req.body ?? {})],
       );
