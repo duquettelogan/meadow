@@ -6,7 +6,20 @@ import { verifyEmailFor } from '../helpers';
 
 // Stub email adapter — count + capture calls so the test can assert
 // without going through the console provider's stdout side effect.
-const sentEmails: { to: string; subject: string }[] = [];
+//
+// Why vi.hoisted instead of a plain top-level const: vitest moves
+// vi.mock() ABOVE every static import in the file. The email module
+// gets loaded transitively when `app` is imported on line 3, which
+// triggers the mock factory while the test file's own body hasn't
+// run yet. A naked `const sentEmails = []` is still in the temporal
+// dead zone at that moment — the closure captures a TDZ binding and
+// nothing ever lands in the array (alerted=1 but sentEmails.length=0,
+// the exact symptom that hit CI on PR #20). vi.hoisted runs alongside
+// the hoisted vi.mock so the binding exists before the factory closes
+// over it.
+const { sentEmails } = vi.hoisted(() => ({
+  sentEmails: [] as { to: string; subject: string }[],
+}));
 vi.mock('../../src/email', async (importOriginal) => {
   const real = await importOriginal<typeof import('../../src/email')>();
   return {
