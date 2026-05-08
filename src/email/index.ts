@@ -166,7 +166,9 @@ export async function sendBoxOfflineEmail(
   to: string,
   opts: { lastSeenIso?: string | null; baseUrl?: string } = {},
 ): Promise<void> {
-  const url = `${opts.baseUrl ?? defaultBaseUrl()}/box-health`;
+  // The Box Health panel renders inline on the dashboard home page;
+  // there is no /box-health route. Send recipients to /dashboard.
+  const url = `${opts.baseUrl ?? defaultBaseUrl()}/dashboard`;
   const lastSeen = opts.lastSeenIso
     ? `Last seen: ${opts.lastSeenIso}`
     : 'We have not received a heartbeat from your box recently.';
@@ -184,7 +186,7 @@ export async function sendBoxOfflineEmail(
         '  - your home router still hands out DHCP normally',
         '  - the box is reachable on the LAN at meadow.local',
         '',
-        `Box health panel: ${url}`,
+        `Open dashboard: ${url}`,
         '',
         'You will not receive another email until the box reconnects',
         'and goes silent again.',
