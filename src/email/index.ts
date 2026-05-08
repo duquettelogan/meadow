@@ -195,6 +195,42 @@ export async function sendBoxOfflineEmail(
   }
 }
 
+/**
+ * Co-parent invite. Sent by POST /api/v1/family/invite — recipient
+ * follows the magic link, picks a password, and joins the existing
+ * family as a second parent.
+ */
+export async function sendFamilyInviteEmail(
+  to: string,
+  token: string,
+  opts: { invitedByEmail?: string; familyName?: string | null; baseUrl?: string } = {},
+): Promise<void> {
+  const url = `${opts.baseUrl ?? defaultBaseUrl()}/accept-invite?token=${encodeURIComponent(token)}`;
+  const familyLabel = opts.familyName?.trim()
+    ? `the ${opts.familyName.trim()} family`
+    : 'their family';
+  const invitedBy = opts.invitedByEmail
+    ? `${opts.invitedByEmail} `
+    : 'A parent ';
+  try {
+    await getEmailProvider().send({
+      to,
+      subject: `You're invited to join ${familyLabel} on Meadow`,
+      text: [
+        `${invitedBy}invited you to be a co-parent on Meadow.`,
+        '',
+        'Click here to accept and set your password:',
+        url,
+        '',
+        'This link expires in 7 days. Only the person with this email',
+        'address can use it.',
+      ].join('\n'),
+    });
+  } catch (err) {
+    console.error('[email] family invite send failed:', err);
+  }
+}
+
 function defaultBaseUrl(): string {
   return process.env.DASHBOARD_URL || 'https://meadow.dqsec.com';
 }

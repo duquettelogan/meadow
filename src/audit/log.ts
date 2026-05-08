@@ -32,6 +32,9 @@ export type AuditAction =
   | 'parent.email.verified'
   | 'parent.account.updated'
   | 'family.deleted'
+  | 'parent.invite.created'
+  | 'parent.invite.accepted'
+  | 'parent.removed'
   // Resources
   | 'child.created'
   | 'child.policy.updated'

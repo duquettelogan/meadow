@@ -29,12 +29,15 @@ import {
   BoxNetworkStatusBody,
   UpdateAccountBody,
   DeleteAccountBody,
+  FamilyInviteBody,
+  FamilyInviteAcceptBody,
 } from './validation';
 import { resolveLimiter, defaultLimiter } from './rate-limits';
 import { audit } from '../audit/log';
-import { verifyPassword } from '../auth/passwords';
+import { verifyPassword, hashPassword } from '../auth/passwords';
 import { revokeAllForParent } from '../auth/revocation';
-import { sendVerificationEmail } from '../email';
+import { signParentToken } from '../auth/jwt';
+import { sendVerificationEmail, sendFamilyInviteEmail } from '../email';
 
 const app = express();
 
@@ -365,6 +368,272 @@ app.delete(
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
       console.error('account delete failed:', err);
+      res.status(500).json({ error: 'internal server error' });
+    } finally {
+      client.release();
+    }
+  },
+);
+
+// ---------- Co-parent invitations ----------
+//
+// Family-level multi-parent membership. The founding parent (or any
+// already-verified co-parent) emails an invite to a partner; the
+// partner clicks the magic link, picks a password, and joins the same
+// family with their own parent_id. From there both parents can manage
+// children, devices, and the household filter policy.
+
+// POST /api/v1/family/invite — create + email an invitation.
+//   body: { email }
+// Verified-parent gate: pairing-claim-grade trust to add a co-parent.
+app.post(
+  '/api/v1/family/invite',
+  requireParentAuth,
+  requireVerifiedParent,
+  validateBody(FamilyInviteBody),
+  async (req, res) => {
+    const { email } = req.body as { email: string };
+    const familyId = req.parent!.family_id;
+    const inviterId = req.parent!.parent_id;
+
+    try {
+      // Refuse if there's already a parent on this email globally —
+      // they'd hit a UNIQUE collision when accepting. Better to surface
+      // the conflict before sending the email.
+      const existing = await db.query(
+        'SELECT 1 FROM parents WHERE email = $1',
+        [email],
+      );
+      if (existing.rows.length > 0) {
+        res.status(409).json({ error: 'email already registered' });
+        return;
+      }
+
+      const token = crypto.randomBytes(32).toString('base64url');
+      const ins = await db.query(
+        `INSERT INTO family_invitations
+           (family_id, invited_by_parent_id, email, token)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id, expires_at`,
+        [familyId, inviterId, email, token],
+      );
+
+      // Look up dressing for the email — inviter's email + family name
+      // (if they've set one via PATCH /account).
+      const ctx = await db.query(
+        `SELECT p.email AS inviter_email, f.email AS family_email
+         FROM parents p
+         JOIN families f ON f.id = p.family_id
+         WHERE p.id = $1`,
+        [inviterId],
+      );
+      const inviterEmail = ctx.rows[0]?.inviter_email;
+
+      sendFamilyInviteEmail(email, token, {
+        invitedByEmail: inviterEmail,
+        familyName: null,
+      }).catch(() => {});
+
+      audit(req, 'parent.invite.created', {
+        target_kind: 'family_invitation',
+        target_id: ins.rows[0].id,
+        metadata: { email },
+      });
+
+      res.status(201).json({
+        id: ins.rows[0].id,
+        email,
+        expires_at: ins.rows[0].expires_at,
+      });
+    } catch (err) {
+      console.error('family invite failed:', err);
+      res.status(500).json({ error: 'internal server error' });
+    }
+  },
+);
+
+// POST /api/v1/family/invite/accept — anonymous; consumes the magic
+// link token, creates the new parent under the existing family, and
+// returns a JWT.
+//
+//   body: { token, password }
+//
+// Email is taken from the invitation row (not body) so a stolen
+// token can't be redirected to a different mailbox.
+app.post(
+  '/api/v1/family/invite/accept',
+  validateBody(FamilyInviteAcceptBody),
+  async (req, res) => {
+    const { token, password } = req.body as {
+      token: string;
+      password: string;
+    };
+
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+
+      const inv = await client.query(
+        `SELECT id, family_id, email, expires_at, used_at
+         FROM family_invitations
+         WHERE token = $1
+         FOR UPDATE`,
+        [token],
+      );
+      if (inv.rows.length === 0) {
+        await client.query('ROLLBACK');
+        res.status(404).json({ error: 'invalid token' });
+        return;
+      }
+      const row = inv.rows[0];
+      if (row.used_at) {
+        await client.query('ROLLBACK');
+        res.status(409).json({ error: 'invitation already used' });
+        return;
+      }
+      if (new Date(row.expires_at).getTime() < Date.now()) {
+        await client.query('ROLLBACK');
+        res.status(410).json({ error: 'invitation expired' });
+        return;
+      }
+
+      const passwordHash = await hashPassword(password);
+      let parent;
+      try {
+        const inserted = await client.query(
+          `INSERT INTO parents
+             (family_id, email, password_hash, email_verified_at)
+           VALUES ($1, $2, $3, NOW())
+           RETURNING id, family_id, email, created_at`,
+          [row.family_id, row.email, passwordHash],
+        );
+        parent = inserted.rows[0];
+      } catch (err: any) {
+        if (err.code === '23505') {
+          await client.query('ROLLBACK');
+          res.status(409).json({ error: 'email already registered' });
+          return;
+        }
+        throw err;
+      }
+
+      await client.query(
+        'UPDATE family_invitations SET used_at = NOW() WHERE id = $1',
+        [row.id],
+      );
+
+      await client.query('COMMIT');
+
+      audit(req, 'parent.invite.accepted', {
+        family_id: parent.family_id,
+        parent_id: parent.id,
+        target_kind: 'family_invitation',
+        target_id: row.id,
+      });
+
+      const jwt = signParentToken({
+        parent_id: parent.id,
+        family_id: parent.family_id,
+      });
+      res.status(201).json({
+        token: jwt,
+        parent: {
+          id: parent.id,
+          email: parent.email,
+          family_id: parent.family_id,
+        },
+      });
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      console.error('invite accept failed:', err);
+      res.status(500).json({ error: 'internal server error' });
+    } finally {
+      client.release();
+    }
+  },
+);
+
+// GET /api/v1/family/parents — list every parent on the caller's family.
+// No password hashes; just identity + verification status + when they
+// joined.
+app.get('/api/v1/family/parents', requireParentAuth, async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT id, email, email_verified_at, created_at, last_login_at
+       FROM parents
+       WHERE family_id = $1
+       ORDER BY created_at ASC`,
+      [req.parent!.family_id],
+    );
+    res.json({ parents: result.rows });
+  } catch (err) {
+    console.error('list parents failed:', err);
+    res.status(500).json({ error: 'internal server error' });
+  }
+});
+
+// DELETE /api/v1/family/parents/:id — remove a co-parent from the family.
+//
+// Refuses self-removal (use DELETE /account if you want to leave) and
+// last-parent removal (would orphan the family). Co-parent removal
+// requires verified-parent posture.
+app.delete(
+  '/api/v1/family/parents/:id',
+  requireParentAuth,
+  requireVerifiedParent,
+  async (req, res) => {
+    const targetId = req.params.id as string;
+    const familyId = req.parent!.family_id;
+    const callerId = req.parent!.parent_id;
+
+    if (targetId === callerId) {
+      res
+        .status(400)
+        .json({ error: 'cannot remove yourself; use DELETE /api/v1/account' });
+      return;
+    }
+
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+
+      const target = await client.query(
+        'SELECT 1 FROM parents WHERE id = $1 AND family_id = $2',
+        [targetId, familyId],
+      );
+      if (target.rows.length === 0) {
+        await client.query('ROLLBACK');
+        // Conflate "doesn't exist" / "not in your family" — same
+        // posture as DELETE /children to avoid existence-probing.
+        res.status(403).json({ error: 'forbidden' });
+        return;
+      }
+
+      const count = await client.query(
+        'SELECT COUNT(*)::int AS c FROM parents WHERE family_id = $1',
+        [familyId],
+      );
+      if (count.rows[0].c <= 1) {
+        await client.query('ROLLBACK');
+        res
+          .status(400)
+          .json({ error: 'cannot remove the last parent in a family' });
+        return;
+      }
+
+      await client.query('DELETE FROM parents WHERE id = $1', [targetId]);
+
+      await client.query('COMMIT');
+
+      audit(req, 'parent.removed', {
+        target_kind: 'parent',
+        target_id: targetId,
+      });
+
+      res.status(204).end();
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      console.error('remove parent failed:', err);
       res.status(500).json({ error: 'internal server error' });
     } finally {
       client.release();
