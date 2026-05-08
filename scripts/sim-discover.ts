@@ -71,6 +71,23 @@ function printUsage(): void {
   );
 }
 
+/**
+ * Best-effort sanity check on the key shape. Doesn't validate against
+ * the server — just flags obvious typos before the round trip.
+ *   - prefix `mk_` (set in src/auth/keys.ts; required for the
+ *     server's prefix-indexed lookup)
+ *   - hex body (`mk_[a-f0-9]+`)
+ *   - reasonable length (issued keys are ~35 chars)
+ */
+function describeKey(key: string): string {
+  const issues: string[] = [];
+  if (!key.startsWith('mk_')) issues.push('missing mk_ prefix');
+  if (!/^mk_[a-f0-9]+$/.test(key)) issues.push('non-hex characters');
+  if (key.length < 11) issues.push(`length ${key.length} < 11 (too short)`);
+  if (key.length > 80) issues.push(`length ${key.length} > 80 (too long)`);
+  return issues.length ? `WARN ${issues.join(', ')}` : 'shape ok';
+}
+
 async function main(): Promise<void> {
   const args = parse();
 
@@ -80,9 +97,19 @@ async function main(): Promise<void> {
 
   const url = `${args.apiUrl.replace(/\/$/, '')}/api/v1/devices/discovered`;
 
-  console.log(`POST ${url}`);
-  console.log(`  body: ${JSON.stringify(body)}`);
+  // Server indexes api_keys on the first 8 chars of the plaintext (see
+  // src/auth/keys.ts getKeyPrefix). Showing only the prefix lets the
+  // operator verify the row exists and isn't revoked without copying
+  // the full secret out of their terminal:
+  //   psql ... -c "SELECT key_prefix, revoked_at FROM api_keys
+  //                WHERE key_prefix='mk_xxxxx';"
+  const keyPrefix = args.apiKey.slice(0, 8);
 
+  console.log(`POST ${url}`);
+  console.log(`  api-key:   ${keyPrefix}…  (len=${args.apiKey.length}, ${describeKey(args.apiKey)})`);
+  console.log(`  body:      ${JSON.stringify(body)}`);
+
+  const startedAt = Date.now();
   const res = await fetch(url, {
     method: 'POST',
     headers: {
@@ -91,6 +118,7 @@ async function main(): Promise<void> {
     },
     body: JSON.stringify(body),
   });
+  const elapsedMs = Date.now() - startedAt;
 
   const text = await res.text();
   let parsed: unknown = text;
@@ -100,8 +128,30 @@ async function main(): Promise<void> {
     // not json — fine
   }
 
-  console.log(`\n← ${res.status} ${res.statusText}`);
+  console.log(`\n← ${res.status} ${res.statusText}  (${elapsedMs}ms)`);
+  // Surface the response headers most likely to explain a 4xx — content
+  // type tells us if we hit an HTML error page (wrong host?), and
+  // www-authenticate sometimes carries the auth scheme the server
+  // wanted instead.
+  for (const h of ['content-type', 'www-authenticate', 'x-request-id']) {
+    const v = res.headers.get(h);
+    if (v) console.log(`  ${h}: ${v}`);
+  }
   console.log(JSON.stringify(parsed, null, 2));
+
+  if (res.status === 401) {
+    console.error(
+      '\nhint: 401 from /devices/discovered means the device key didn’t resolve.\n' +
+        '      common causes:\n' +
+        '        • api-key was already consumed by the box on its first /box-status\n' +
+        '          poll (single-shot reveal — re-pair, or pull mk_… off the box at\n' +
+        '          /etc/meadow/box.env)\n' +
+        `        • api-key is for a different env than --api-url (you hit ${args.apiUrl})\n` +
+        '        • api-key was revoked — check api_keys.revoked_at for this prefix\n' +
+        '        • mk_… was truncated by your shell (length above ↑ should match\n' +
+        '          what /pairing/box-status returned, typically ~35 chars)',
+    );
+  }
 
   if (!res.ok) process.exit(1);
 }
