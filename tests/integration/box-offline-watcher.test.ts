@@ -92,6 +92,28 @@ beforeEach(() => {
   sentEmails.length = 0;
 });
 
+// Each runOfflineAlertCheckOnce() sweeps EVERY paired box across
+// EVERY family in the DB — that's its production contract. So when
+// these tests run as part of the full suite, the global `alerted`
+// count and the global `sentEmails` array can include rows seeded by
+// other test files (or earlier tests in this file). Asserting on
+// global counts is fragile; assert only on what each test actually
+// owns: this family's email, and this device's offline_alert_sent_at.
+//
+// Helper: did THIS family get an offline email during the most recent
+// sweep? (The mock pushes one entry per call.)
+function emailsFor(email: string): { to: string; subject: string }[] {
+  return sentEmails.filter((e) => e.to === email);
+}
+
+async function alertSentAt(deviceId: string): Promise<Date | null> {
+  const row = await db.query(
+    'SELECT offline_alert_sent_at FROM devices WHERE id = $1',
+    [deviceId],
+  );
+  return row.rows[0]?.offline_alert_sent_at ?? null;
+}
+
 describe('runOfflineAlertCheckOnce', () => {
   it('emails the family + stamps offline_alert_sent_at when a box has been silent >24h', async () => {
     const f = await makeFamily();
@@ -105,16 +127,12 @@ describe('runOfflineAlertCheckOnce', () => {
     );
 
     const alerted = await runOfflineAlertCheckOnce();
-    expect(alerted).toBe(1);
+    // alerted is the GLOBAL count for this sweep; suite-level state may
+    // make it >1. Just ensure at least our box was picked up.
+    expect(alerted).toBeGreaterThanOrEqual(1);
 
-    expect(sentEmails).toHaveLength(1);
-    expect(sentEmails[0].to).toBe(f.email);
-
-    const row = await db.query(
-      'SELECT offline_alert_sent_at FROM devices WHERE id = $1',
-      [box.device_id],
-    );
-    expect(row.rows[0].offline_alert_sent_at).toBeTruthy();
+    expect(emailsFor(f.email)).toHaveLength(1);
+    expect(await alertSentAt(box.device_id)).toBeTruthy();
   });
 
   it('does NOT re-email a box that has already been alerted', async () => {
@@ -127,17 +145,20 @@ describe('runOfflineAlertCheckOnce', () => {
        WHERE id = $1`,
       [box.device_id],
     );
+    const stampBefore = await alertSentAt(box.device_id);
 
-    const alerted = await runOfflineAlertCheckOnce();
-    expect(alerted).toBe(0);
-    expect(sentEmails).toHaveLength(0);
+    await runOfflineAlertCheckOnce();
+    // No NEW email to THIS family, and the stamp didn't move.
+    expect(emailsFor(f.email)).toHaveLength(0);
+    const stampAfter = await alertSentAt(box.device_id);
+    expect(stampAfter?.getTime()).toBe(stampBefore?.getTime());
   });
 
   it('skips non-box devices (no api_key)', async () => {
     const f = await makeFamily();
 
-    // /devices/discovered creates a row with platform=discovered and no
-    // api_key — exactly the synthetic kind we want filtered out.
+    // /devices/register without /auth/devices/:id/keys leaves a row
+    // with no api_key — exactly the synthetic kind we want filtered.
     const child = await request(app)
       .post('/api/v1/children')
       .set('Authorization', `Bearer ${f.token}`)
@@ -159,9 +180,11 @@ describe('runOfflineAlertCheckOnce', () => {
       [dev.body.id],
     );
 
-    const alerted = await runOfflineAlertCheckOnce();
-    expect(alerted).toBe(0);
-    expect(sentEmails).toHaveLength(0);
+    await runOfflineAlertCheckOnce();
+    // The non-box device must not get stamped (key check filters it
+    // out) and our family must not receive an email.
+    expect(await alertSentAt(dev.body.id)).toBeNull();
+    expect(emailsFor(f.email)).toHaveLength(0);
   });
 
   it('skips boxes that are still inside the 24h silent window', async () => {
@@ -173,9 +196,10 @@ describe('runOfflineAlertCheckOnce', () => {
       [box.device_id],
     );
 
-    const alerted = await runOfflineAlertCheckOnce();
-    expect(alerted).toBe(0);
-    expect(sentEmails).toHaveLength(0);
+    await runOfflineAlertCheckOnce();
+    // Box is too recent — no email and no stamp.
+    expect(emailsFor(f.email)).toHaveLength(0);
+    expect(await alertSentAt(box.device_id)).toBeNull();
   });
 });
 
