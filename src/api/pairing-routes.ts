@@ -33,9 +33,22 @@ function normalizeCode(input: string): string {
  * Anonymous endpoint — no parent auth.
  *
  * Idempotent on the (hardware_id, code) pair: a re-register with the
- * same hardware_id refreshes expires_at on the existing unclaimed row.
- * A different hardware_id colliding on the code returns 409 — the box
- * regenerates and retries.
+ * same hardware_id + same code refreshes expires_at on the existing
+ * unclaimed row. A different hardware_id colliding on the code returns
+ * 409 — the box regenerates and retries.
+ *
+ * Re-pair after dashboard delete: any UNCLAIMED leftover pairing_codes
+ * row for this hardware_id is dropped first. The dashboard's
+ * DELETE /devices handler removes the claimed row (and its api_key +
+ * device row), but a partial pair attempt — register-without-claim,
+ * the prior box session crashing mid-flow, etc. — can leave an
+ * unclaimed orphan with the same hardware_id behind. The orphan
+ * doesn't block the new code (the unique key is `code`, not
+ * `hardware_id`), but it also confuses /box-status, which picks the
+ * most recent row by created_at and would return the orphan's
+ * "pending" state if the orphan was created after the new register.
+ * Cleaning up here means box-status always sees exactly the row the
+ * box just registered.
  *
  * Older /pairing/start (server-generated code) flow has been removed —
  * see docs/dashboard-api-notes.md.
@@ -59,8 +72,20 @@ router.post(
          WHERE expires_at < NOW() AND claimed_at IS NULL`
       ).catch(() => {});
 
+      // Defensive cleanup: drop any unclaimed leftover pairing_codes
+      // rows for this hardware_id (see comment block above). Awaited
+      // because the new INSERT below relies on box-status returning the
+      // freshly-registered row.
+      await db.query(
+        `DELETE FROM pairing_codes
+         WHERE hardware_id = $1 AND claimed_at IS NULL`,
+        [hardware_id]
+      );
+
       // Try insert. ON CONFLICT (code) we have two cases:
       //   - same hardware_id and still unclaimed → refresh expires_at
+      //     (won't actually happen post-cleanup above, but kept for
+      //     defense in depth in case two registers race the cleanup)
       //   - different hardware_id, OR row already claimed → 409 (box
       //     regenerates and retries).
       const result = await db.query(
