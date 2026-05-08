@@ -190,11 +190,16 @@ describe('DELETE /api/v1/account', () => {
     );
     expect(counters.rows.length).toBe(0);
 
-    // Audit row preserved (denormalized, no FK).
+    // Audit row preserved (denormalized, no FK). Two parameters here
+    // even though both bind to the same value: target_id is TEXT
+    // (polymorphic), family_id is UUID. Sharing $1 makes pg infer
+    // the parameter as UUID from the first clause and Postgres then
+    // can't apply `text = uuid` for the second — so we send the
+    // value twice with $2 cast to text-friendly territory.
     const auditRow = await db.query(
       `SELECT 1 FROM audit_log
-       WHERE family_id = $1 AND target_id = $1 AND action = 'family.deleted'`,
-      [f.family_id],
+       WHERE family_id = $1 AND target_id = $2 AND action = 'family.deleted'`,
+      [f.family_id, f.family_id],
     );
     expect(auditRow.rows.length).toBe(1);
   });
