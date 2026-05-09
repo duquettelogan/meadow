@@ -567,7 +567,28 @@ app.post(
         expires_at: ins.rows[0].expires_at,
       });
     } catch (err) {
-      console.error('family invite failed:', err);
+      // Detailed structured log so the next prod 500 prints the
+      // PG error code (e.g. 42P01 = table missing → migrate-012
+      // wasn't run; 23505 = unique violation; 23503 = FK violation)
+      // without us having to re-deploy a logging change.
+      const e = err as {
+        message?: string;
+        code?: string;
+        detail?: string;
+        constraint?: string;
+        table?: string;
+        stack?: string;
+      };
+      console.error('family invite failed:', {
+        message: e.message,
+        code: e.code,
+        detail: e.detail,
+        constraint: e.constraint,
+        table: e.table,
+        family_id: req.parent?.family_id,
+        inviter_id: req.parent?.parent_id,
+        stack: e.stack,
+      });
       res.status(500).json({ error: 'internal server error' });
     }
   },

@@ -1,4 +1,4 @@
-import { testConnection } from './db/connection';
+import { db, testConnection } from './db/connection';
 import { connectCache } from './cache/index';
 import { loadBlocklist } from './cache/blocklist';
 import { startScheduler, stopScheduler } from './intel/updater';
@@ -17,6 +17,7 @@ async function main() {
   console.log('Starting Meadow...');
   await testConnection();
   console.log('Database connected.');
+  await assertSchemaInPlace();
   await connectCache();
   await loadBlocklist();
   startScheduler();
@@ -64,6 +65,57 @@ async function main() {
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
+}
+
+/**
+ * Schema sanity probe.
+ *
+ * Run at boot — verifies the tables every recently-added migration
+ * created actually exist in the database the app is pointed at. The
+ * Dockerfile doesn't run migrations as part of `CMD`; they're a
+ * separate manual step. Forgetting to run them shows up later as a
+ * 500 on the first request that touches the missing table (e.g. the
+ * /family/invite alpha-test 500 most likely came from migrate-012
+ * not having been applied yet).
+ *
+ * Logs loud + exits non-zero so the process restart loop / fly logs
+ * make the missing migration immediately obvious. Better than
+ * limping along until a user trips over it.
+ *
+ * Add new tables to REQUIRED_TABLES whenever a migration adds one.
+ */
+const REQUIRED_TABLES = [
+  'families',
+  'parents',
+  'child_profiles',
+  'devices',
+  'filter_policies',
+  'block_counters',
+  'pairing_codes',
+  'api_keys',
+  'audit_log',
+  'family_invitations', // migrate-012
+  'invite_codes', // migrate-013
+];
+
+async function assertSchemaInPlace(): Promise<void> {
+  const result = await db.query(
+    `SELECT tablename FROM pg_tables
+     WHERE schemaname = 'public' AND tablename = ANY($1::text[])`,
+    [REQUIRED_TABLES],
+  );
+  const present = new Set(result.rows.map((r) => r.tablename));
+  const missing = REQUIRED_TABLES.filter((t) => !present.has(t));
+  if (missing.length > 0) {
+    console.error(
+      `[startup] schema sanity check FAILED — missing tables: ${missing.join(', ')}`,
+    );
+    console.error(
+      '[startup] run `npm run migrate` against this database before serving traffic.',
+    );
+    throw new Error(`missing tables: ${missing.join(', ')}`);
+  }
+  console.log(`[startup] schema sanity check OK (${present.size} tables present)`);
 }
 
 main().catch((err) => {
