@@ -43,6 +43,10 @@ process.env.DISABLE_DISCOVERY = '1';
 // runOfflineAlertCheckOnce() directly when they need to.
 process.env.OFFLINE_ALERTS_DISABLED = '1';
 
+// Box-side policy sync timer — same posture; tests drive
+// refreshBoxPolicy() directly when they exercise box mode.
+process.env.POLICY_SYNC_DISABLED = '1';
+
 // Close the connection pool + Redis client after all tests so the
 // process can exit cleanly.
 afterAll(async () => {

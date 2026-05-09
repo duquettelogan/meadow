@@ -1,4 +1,6 @@
 import { db } from '../db/connection';
+import { isBoxMode } from '../mode';
+import { getBoxContext } from '../box/context';
 
 /**
  * Per-family filter policy loader.
@@ -42,6 +44,18 @@ const childCache = new Map<string, CachedEntry>();
 export async function getPolicyForFamily(
   family_id: string,
 ): Promise<FilterPolicy | null> {
+  // Box mode never touches PG — read the policy from the
+  // API-fetched, in-memory box context (kept warm by
+  // src/box/policy-sync.ts). The cached snapshot is keyed implicitly
+  // by the box's own family_id; if a caller asks about a different
+  // family_id (shouldn't happen in box mode) we return null rather
+  // than leaking another family's cached state.
+  if (isBoxMode()) {
+    const ctx = getBoxContext();
+    if (!ctx || ctx.family_id !== family_id) return null;
+    return ctx.policy;
+  }
+
   const now = Date.now();
   const entry = familyCache.get(family_id);
   if (entry && now - entry.loadedAt < TTL_MS) {
