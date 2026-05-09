@@ -289,6 +289,29 @@ export const FamilyInviteAcceptBody = z
   })
   .strict();
 
+// ---------- Box ↔ cloud sync ----------
+//
+// POST /api/v1/box/blocks body. The box pre-aggregates DNS-block
+// counters per (child_profile_id, category, hour-bucket) on its own
+// side, then flushes batches up here. Capped at 1000 events per
+// request so a misbehaving box can't blow up the server's memory in
+// one round trip.
+export const BoxBlockEvent = z
+  .object({
+    child_profile_id: uuid,
+    category: z.string().min(1).max(80),
+    count: z.number().int().positive().max(1_000_000),
+    first_seen_at: z.string().datetime(),
+    last_seen_at: z.string().datetime(),
+  })
+  .strict();
+
+export const BoxBlocksBody = z
+  .object({
+    events: z.array(BoxBlockEvent).min(1).max(1000),
+  })
+  .strict();
+
 // ---------- Admin: invite codes ----------
 //
 // All fields optional — admin can mint a default single-use code with

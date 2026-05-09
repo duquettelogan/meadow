@@ -27,6 +27,7 @@ import {
   DiscoveredDeviceBody,
   UpdateDeviceBody,
   BoxNetworkStatusBody,
+  BoxBlocksBody,
   UpdateAccountBody,
   DeleteAccountBody,
   FamilyInviteBody,
@@ -1392,6 +1393,184 @@ app.delete(
       res.status(500).json({ error: 'internal server error' });
     } finally {
       client.release();
+    }
+  },
+);
+
+// ---------- Box ↔ cloud sync ----------
+//
+// These three endpoints let a box-mode Pi run with NO local database.
+// Cloud is the single source of truth for filter policy, device →
+// child mappings, and aggregated block counters. The box pulls policy
+// on a 5-minute timer (and at boot), pushes pre-aggregated block
+// events on a 30-second flush, and reads device→child mappings when
+// it needs to attribute a query from a MAC to a specific child.
+//
+// All three use device-key auth (requireDeviceAuth) — the api_key
+// resolves to a single device, and the device row carries family_id,
+// so every response is implicitly family-scoped.
+
+// GET /api/v1/box/policy — what the box should be enforcing right now.
+//
+// Returns the family's Household filter_policy plus a short hash of
+// its contents (policy_version) so the box can short-circuit a no-op
+// reload when nothing has changed since the last poll. blocklist_versions
+// is currently a placeholder for future cloud-side intel-feed tracking;
+// in v1 the box manages its own intel updates and ignores this field.
+app.get('/api/v1/box/policy', requireDeviceAuth, async (req, res) => {
+  try {
+    const familyId = req.device!.family_id;
+    const result = await db.query(
+      `SELECT c.id AS household_child_id,
+              p.blocked_categories, p.allowed_domains, p.blocked_domains,
+              p.safe_search_enforce, p.youtube_restrict
+       FROM child_profiles c
+       JOIN filter_policies p ON p.child_profile_id = c.id
+       WHERE c.family_id = $1 AND c.is_household = true`,
+      [familyId],
+    );
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'no household policy for family' });
+      return;
+    }
+    const row = result.rows[0];
+    // Stable hash of just the policy fields. Hex-truncated so it's
+    // diffable in logs but still has enough entropy to detect any
+    // realistic change. Box compares this against its cached value.
+    const policyVersion = crypto
+      .createHash('sha256')
+      .update(
+        JSON.stringify({
+          c: row.blocked_categories,
+          a: row.allowed_domains,
+          b: row.blocked_domains,
+          s: row.safe_search_enforce,
+          y: row.youtube_restrict,
+        }),
+      )
+      .digest('hex')
+      .slice(0, 16);
+    res.json({
+      family_id: familyId,
+      household_child_id: row.household_child_id,
+      policy_version: policyVersion,
+      categories_blocked: row.blocked_categories,
+      parent_blocklist: row.blocked_domains,
+      parent_allowlist: row.allowed_domains,
+      safe_search_enforce: row.safe_search_enforce,
+      youtube_restrict: row.youtube_restrict,
+      // Reserved for future cloud-side intel-feed version tracking.
+      // The box ignores this in v1 and runs its own intel updater.
+      blocklist_versions: {},
+    });
+  } catch (err) {
+    console.error('GET /box/policy failed:', err);
+    res.status(500).json({ error: 'internal server error' });
+  }
+});
+
+// POST /api/v1/box/blocks — batched block-counter push from the box.
+//
+// Each event is (child_profile_id, category, count, first_seen_at,
+// last_seen_at). The box bucketizes its own blocks per
+// (child × category × hour) on its side, so a single batch typically
+// covers the last 30s of activity. Server upserts into block_counters
+// keyed on (child_profile_id, day, category) — the day is taken from
+// last_seen_at::date so backfilled events from a slow flush land in
+// the right calendar bucket.
+//
+// Family-scope guard: each event's child_profile_id is required to
+// belong to the calling box's family. Mismatched events are silently
+// dropped and counted in `rejected` so a misbehaving box can't write
+// counters into another family's history.
+app.post(
+  '/api/v1/box/blocks',
+  requireDeviceAuth,
+  validateBody(BoxBlocksBody),
+  async (req, res) => {
+    const familyId = req.device!.family_id;
+    const events = (req.body as { events: Array<{
+      child_profile_id: string;
+      category: string;
+      count: number;
+      first_seen_at: string;
+      last_seen_at: string;
+    }> }).events;
+
+    let accepted = 0;
+    let rejected = 0;
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Pre-fetch the family's child_profile_ids so we can filter
+      // events without a per-row JOIN. Cheaper than embedding the
+      // family check in every UPSERT, and lets us return a useful
+      // rejected-count for diagnostics.
+      const childRows = await client.query(
+        'SELECT id FROM child_profiles WHERE family_id = $1',
+        [familyId],
+      );
+      const familyChildren = new Set<string>(
+        childRows.rows.map((r: { id: string }) => r.id),
+      );
+
+      for (const ev of events) {
+        if (!familyChildren.has(ev.child_profile_id)) {
+          rejected++;
+          continue;
+        }
+        await client.query(
+          // UTC for the day bucket so the same wall-clock event lands
+          // in the same row regardless of which TZ the PG session is
+          // running in (Fly's managed PG vs a local dev box can differ).
+          `INSERT INTO block_counters (child_profile_id, day, category, count)
+           VALUES ($1, (($2::timestamptz) AT TIME ZONE 'UTC')::date, $3, $4)
+           ON CONFLICT (child_profile_id, day, category)
+           DO UPDATE SET count = block_counters.count + EXCLUDED.count`,
+          [ev.child_profile_id, ev.last_seen_at, ev.category, ev.count],
+        );
+        accepted++;
+      }
+
+      await client.query('COMMIT');
+      res.json({ accepted, rejected });
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      console.error('POST /box/blocks failed:', err);
+      res.status(500).json({ error: 'internal server error' });
+    } finally {
+      client.release();
+    }
+  },
+);
+
+// GET /api/v1/box/device-children — per-MAC child attribution mappings.
+//
+// In v1 the resolver attributes every block to the synthetic Household
+// child (single source of family-wide counts). When the dashboard
+// later assigns a device to a specific child via PATCH /devices/:id,
+// the box can use these mappings to attribute that device's queries
+// to the specific child instead of Household. Devices without a child
+// assignment OR without a known MAC are excluded — they implicitly
+// fall back to Household on the box side.
+app.get(
+  '/api/v1/box/device-children',
+  requireDeviceAuth,
+  async (req, res) => {
+    try {
+      const result = await db.query(
+        `SELECT mac, child_profile_id
+         FROM devices
+         WHERE family_id = $1
+           AND mac IS NOT NULL
+           AND child_profile_id IS NOT NULL`,
+        [req.device!.family_id],
+      );
+      res.json({ mappings: result.rows });
+    } catch (err) {
+      console.error('GET /box/device-children failed:', err);
+      res.status(500).json({ error: 'internal server error' });
     }
   },
 );
