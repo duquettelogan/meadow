@@ -3,10 +3,20 @@ import rateLimit, { Options } from 'express-rate-limit';
 /**
  * Rate limiters.
  *
- * Login: 5 attempts per IP per 15min. Stops basic credential stuffing.
+ * Login: 10 failed attempts per IP per minute. Originally 5 per 15min,
+ *        loosened during alpha so legitimate "I fat-fingered my
+ *        password three times" testing doesn't lock the operator out.
+ *        skipSuccessfulRequests is still on, so successful logins
+ *        don't count toward the bucket.
  * Signup: 5 per IP per hour. Prevents account spam.
  * Resolve: 600/min per IP. Plenty for legitimate DNS but stops floods.
  * Default: 60/min per IP for everything else.
+ *
+ * Admin allowlist (env IS_ADMIN_EMAIL — comma separated) is exempted
+ * from every limiter. The check looks at req.body.email when present,
+ * so login/signup/forgot-password/etc. all match. Limiters that don't
+ * see an email in the body (resolve, default, pairing-device) just
+ * apply the normal limit — admins don't realistically hit those.
  *
  * Note: these are IP-based. Behind a load balancer you need to set
  * app.set('trust proxy', 1) so req.ip reflects the real client.
@@ -16,18 +26,36 @@ import rateLimit, { Options } from 'express-rate-limit';
 
 const DISABLED = process.env.DISABLE_RATE_LIMITS === '1';
 
+function isAdminEmail(email: unknown): boolean {
+  if (typeof email !== 'string') return false;
+  const allowlist = (process.env.IS_ADMIN_EMAIL ?? '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  if (allowlist.length === 0) return false;
+  return allowlist.includes(email.toLowerCase());
+}
+
 function makeLimiter(opts: Partial<Options>) {
   return rateLimit({
     standardHeaders: 'draft-7',
     legacyHeaders: false,
-    skip: () => DISABLED,
     ...opts,
+    // Skip after the spread so it composes with — and supersedes —
+    // any per-limiter skip the caller provided.
+    skip: (req, res) => {
+      if (DISABLED) return true;
+      if (isAdminEmail((req.body as { email?: unknown } | undefined)?.email)) {
+        return true;
+      }
+      return typeof opts.skip === 'function' ? opts.skip(req, res) : false;
+    },
   });
 }
 
 export const loginLimiter = makeLimiter({
-  windowMs: 15 * 60 * 1000,
-  limit: 5,
+  windowMs: 60 * 1000,
+  limit: 10,
   message: { error: 'too many login attempts, try again later' },
   skipSuccessfulRequests: true,
 });
