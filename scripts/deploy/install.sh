@@ -4,20 +4,32 @@
 # Sets up Meadow on a Debian-based Linux system (Pi OS Lite, Ubuntu Server,
 # Pop!OS, etc.). Idempotent — safe to re-run.
 #
-# What it does:
-#   1. Installs system deps (Node 20, Postgres, Redis, build tools)
-#   2. Creates dedicated `meadow` system user
-#   3. Clones (or updates) the repo into /opt/meadow
-#   4. Sets up Postgres user + database
-#   5. Generates strong secrets in /etc/meadow/meadow.env
-#   6. Runs migrations
-#   7. Installs and starts systemd service
-#   8. Verifies /health endpoint
+# Two install modes:
+#
+#   box  (default on a Raspberry Pi)
+#       The on-prem device. NO Postgres. Filter policy comes from the
+#       cloud API; block events go back via the cloud API. Keeps
+#       Redis (for the local intel blocklist + box context cache),
+#       dnsmasq + avahi for the LAN handoff, and the Meadow service.
+#       meadow.env gets MEADOW_MODE=box and DATABASE_URL is omitted.
+#
+#   api  (default everywhere else)
+#       The cloud API server. Postgres + Redis + Meadow service +
+#       migrations. The path historically taken by this script.
+#       Note: production runs on Fly.io and uses the Dockerfile, not
+#       this installer; this is for self-hosters / dev VMs.
+#
+# Detection order:
+#   1. MEADOW_INSTALL_MODE env var (`box` or `api`) — wins.
+#   2. /sys/firmware/devicetree/base/model exists → box (Pi marker).
+#   3. Otherwise → api.
 #
 # Usage:
-#   sudo ./install.sh                     # default: clone from main repo
-#   sudo REPO_URL=... ./install.sh        # use a different repo
-#   sudo REPO_REF=branchname ./install.sh # use a different branch/tag
+#   sudo ./install.sh                            # auto-detect mode
+#   sudo MEADOW_INSTALL_MODE=box ./install.sh    # force box
+#   sudo MEADOW_INSTALL_MODE=api ./install.sh    # force api
+#   sudo REPO_URL=... ./install.sh               # use a different repo
+#   sudo REPO_REF=branchname ./install.sh        # use a different branch/tag
 #
 # Tested on:
 #   - Pi OS Lite (Bookworm, ARM64)
@@ -65,6 +77,20 @@ fi
 
 ARCH=$(uname -m)
 ok "arch: $ARCH"
+
+# Resolve install mode. Explicit env var wins; otherwise auto-detect:
+# /sys/firmware/devicetree/base/model exists on every Raspberry Pi.
+if [ -n "${MEADOW_INSTALL_MODE:-}" ]; then
+  case "$MEADOW_INSTALL_MODE" in
+    box|api) MODE="$MEADOW_INSTALL_MODE" ;;
+    *)       die "MEADOW_INSTALL_MODE must be 'box' or 'api', got '$MEADOW_INSTALL_MODE'" ;;
+  esac
+elif [ -f /sys/firmware/devicetree/base/model ]; then
+  MODE=box
+else
+  MODE=api
+fi
+ok "install mode: $MODE"
 
 step "Installing system packages"
 export DEBIAN_FRONTEND=noninteractive
@@ -132,26 +158,31 @@ sudo -u "$SYSTEM_USER" npm ci --silent --omit=dev >/dev/null 2>&1 || \
 sudo -u "$SYSTEM_USER" npm install --silent ts-node typescript >/dev/null 2>&1
 ok "npm deps installed"
 
-step "Setting up Postgres"
-systemctl start postgresql
-systemctl enable -q postgresql
+if [ "$MODE" = "api" ]; then
+  step "Setting up Postgres"
+  systemctl start postgresql
+  systemctl enable -q postgresql
 
-# Idempotent role + database creation.
-if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" | grep -q 1; then
-  DB_PASS=$(openssl rand -hex 24)
-  sudo -u postgres psql -q -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASS';" >/dev/null
-  ok "created postgres user $DB_USER"
-else
-  ok "postgres user $DB_USER already exists"
-  # Re-read password from existing env file later if needed.
-  DB_PASS=""
-fi
+  # Idempotent role + database creation.
+  if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" | grep -q 1; then
+    DB_PASS=$(openssl rand -hex 24)
+    sudo -u postgres psql -q -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASS';" >/dev/null
+    ok "created postgres user $DB_USER"
+  else
+    ok "postgres user $DB_USER already exists"
+    # Re-read password from existing env file later if needed.
+    DB_PASS=""
+  fi
 
-if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" | grep -q 1; then
-  sudo -u postgres psql -q -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" >/dev/null
-  ok "created database $DB_NAME"
+  if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" | grep -q 1; then
+    sudo -u postgres psql -q -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" >/dev/null
+    ok "created database $DB_NAME"
+  else
+    ok "database $DB_NAME already exists"
+  fi
 else
-  ok "database $DB_NAME already exists"
+  step "Postgres setup"
+  ok "skipped (box mode talks to the cloud API instead)"
 fi
 
 step "Setting up Redis"
@@ -206,7 +237,7 @@ chmod 750 "$ENV_DIR"
 
 if [ ! -f "$ENV_FILE" ]; then
   # Fresh install — generate everything.
-  if [ -z "$DB_PASS" ]; then
+  if [ "$MODE" = "api" ] && [ -z "$DB_PASS" ]; then
     # Postgres user already existed without a tracked password — reset it.
     DB_PASS=$(openssl rand -hex 24)
     sudo -u postgres psql -q -c "ALTER USER $DB_USER WITH PASSWORD '$DB_PASS';" >/dev/null
@@ -216,9 +247,12 @@ if [ ! -f "$ENV_FILE" ]; then
   JWT_SECRET=$(openssl rand -hex 32)
   HMAC_SECRET=$(openssl rand -hex 32)
 
-  cat > "$ENV_FILE" <<EOF
-# Generated by install.sh on $(date -Iseconds)
+  if [ "$MODE" = "api" ]; then
+    cat > "$ENV_FILE" <<EOF
+# Generated by install.sh on $(date -Iseconds) (mode=api)
 # Restart the service after changing values: systemctl restart $SERVICE_NAME
+
+MEADOW_MODE=api
 
 DATABASE_URL=postgres://$DB_USER:$DB_PASS@localhost:5432/$DB_NAME
 REDIS_URL=redis://localhost:6379
@@ -234,9 +268,27 @@ OPENAI_API_KEY=
 PORT=3000
 ALLOWED_ORIGINS=http://localhost:5173,http://localhost:3001
 EOF
+  else
+    # Box mode — no DATABASE_URL, no JWT/HMAC secrets (those are
+    # cloud-side concerns). API_URL points at the cloud.
+    cat > "$ENV_FILE" <<EOF
+# Generated by install.sh on $(date -Iseconds) (mode=box)
+# Restart the service after changing values: systemctl restart $SERVICE_NAME
+
+MEADOW_MODE=box
+
+# Where the box phones home. The bootstrap also reads API_URL from
+# $BOOTSTRAP_FILE; this entry keeps the runtime process consistent.
+API_URL=$API_URL
+
+REDIS_URL=redis://localhost:6379
+
+PORT=3000
+EOF
+  fi
   chmod 640 "$ENV_FILE"
   chown root:"$SYSTEM_USER" "$ENV_FILE"
-  ok "wrote $ENV_FILE with generated secrets"
+  ok "wrote $ENV_FILE (mode=$MODE)"
 else
   ok "$ENV_FILE already exists, leaving it alone"
 fi
@@ -255,12 +307,17 @@ else
   ok "$BOOTSTRAP_FILE already exists, leaving it alone"
 fi
 
-step "Running database migrations"
-cd "$INSTALL_DIR"
-sudo -u "$SYSTEM_USER" --preserve-env=PATH \
-  bash -c "set -a; source $ENV_FILE; set +a; npx ts-node scripts/run-migrations.ts" \
-  >/dev/null
-ok "migrations applied"
+if [ "$MODE" = "api" ]; then
+  step "Running database migrations"
+  cd "$INSTALL_DIR"
+  sudo -u "$SYSTEM_USER" --preserve-env=PATH \
+    bash -c "set -a; source $ENV_FILE; set +a; npx ts-node scripts/run-migrations.ts" \
+    >/dev/null
+  ok "migrations applied"
+else
+  step "Database migrations"
+  ok "skipped (box mode — schema lives on the cloud API)"
+fi
 
 step "Installing systemd service"
 SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}.service"

@@ -1,4 +1,20 @@
-# Production Deploy (Fly.io)
+# Production Deploy
+
+This file covers two distinct deployments:
+
+1. **Cloud API server (Fly.io)** — the database-backed REST surface
+   that the dashboard talks to and that home boxes phone into.
+   Single instance, single source of truth.
+
+2. **Box (Raspberry Pi)** — the on-prem device that runs the LAN's
+   DNS filter. NO Postgres. Pulls policy from the cloud API on a
+   timer; pushes block events back via the cloud API. Provisioned
+   via `scripts/deploy/install.sh` with `MEADOW_INSTALL_MODE=box`
+   (auto-detected on a Pi via `/sys/firmware/devicetree/base/model`).
+
+Skip to "Pi box install" below for #2.
+
+# Cloud API (Fly.io)
 
 End-to-end checklist for putting the Meadow API on the public internet
 so home boxes can phone in. Logan: do not skip the secret generation
@@ -101,3 +117,44 @@ fly checks list         # health-check history
 
 Hook the /health endpoint into Better Stack / Cronitor / your monitor of
 choice for paging when the app goes down.
+
+# Pi box install
+
+The Pi runs in **box mode** — no Postgres, all policy / block-counter
+data flows through the cloud API. `install.sh` auto-detects a Pi via
+`/sys/firmware/devicetree/base/model` and skips the Postgres install +
+migrations + secret generation entirely.
+
+```sh
+# Fresh Pi OS Lite (Bookworm 64-bit), wired to the LAN, ssh enabled.
+sudo apt-get update && sudo apt-get install -y curl git
+git clone https://github.com/duquettelogan/meadow.git /tmp/meadow
+sudo API_URL=https://api.meadow.dqsec.com /tmp/meadow/scripts/deploy/install.sh
+```
+
+What that does:
+- Installs Node 20, Redis, dnsmasq, avahi, the meadow systemd unit.
+- Writes `/etc/meadow/meadow.env` with `MEADOW_MODE=box` and
+  `API_URL=$API_URL`. **No DATABASE_URL** (box doesn't need it).
+- Skips `npx ts-node scripts/run-migrations.ts` — the cloud API
+  owns the schema.
+- Starts the meadow service.
+
+After install:
+
+```sh
+sudo /tmp/meadow/scripts/deploy/pi-setup.sh    # hostname=meadow + UFW
+```
+
+Pairing — the box's bootstrap (in `src/box/bootstrap.ts`) generates
+an 8-digit code and exposes it via the on-LAN web page at
+`http://meadow.local`. The parent enters it in the dashboard's
+"claim by code" UI; the box polls `/api/v1/pairing/box-status/:hw_id`
+until the cloud reveals the api_key.
+
+Forcing a mode:
+
+```sh
+sudo MEADOW_INSTALL_MODE=box sudo ./install.sh   # explicit box (e.g. dev VM)
+sudo MEADOW_INSTALL_MODE=api sudo ./install.sh   # explicit api (self-host)
+```
