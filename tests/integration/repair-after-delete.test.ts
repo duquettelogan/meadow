@@ -83,6 +83,47 @@ describe('re-pair after device delete', () => {
     expect(oldRow.rows.length).toBe(0);
   });
 
+  it('DELETE /devices wipes EVERY pairing_codes row for the same hardware_id', async () => {
+    // Belt-and-braces — the alpha-test 409 ("code already claimed")
+    // implies SOMETHING leaves a claimed pairing_codes row behind for
+    // this hardware_id past the delete. Static analysis says it
+    // shouldn't happen with the current claim-by-code transaction,
+    // but the DELETE handler now sweeps by hardware_id too, so any
+    // claimed leftover (from a prior schema, a half-completed earlier
+    // flow, or a manual psql touch) is also wiped.
+    const f = await makeFamily();
+    const hardware_id = uniqueHwId();
+    const first = await pair(f.token, hardware_id);
+
+    // Manually seed a SECOND pairing_codes row with the same
+    // hardware_id, marked claimed, no device_id — simulating the
+    // worst-case orphan: a row that wouldn't be caught by the old
+    // device_id / api_key_id sweep alone.
+    const orphan = uniqueCode();
+    await db.query(
+      `INSERT INTO pairing_codes
+         (code, hardware_id, platform, expires_at, claimed_at)
+       VALUES ($1, $2, 'router', NOW() + INTERVAL '10 minutes', NOW())`,
+      [orphan, hardware_id],
+    );
+
+    const del = await request(app)
+      .delete(`/api/v1/devices/${first.device_id}`)
+      .set('Authorization', `Bearer ${f.token}`);
+    expect(del.status).toBe(204);
+
+    // Both rows for this hardware_id are gone.
+    const remaining = await db.query(
+      'SELECT code FROM pairing_codes WHERE hardware_id = $1',
+      [hardware_id],
+    );
+    expect(remaining.rows).toHaveLength(0);
+
+    // Re-pair works clean.
+    const second = await pair(f.token, hardware_id);
+    expect(second.device_id).toBeTruthy();
+  });
+
   it('register sweeps unclaimed orphan pairing_codes for the same hardware_id', async () => {
     // The dashboard's DELETE /devices removes the CLAIMED pairing_codes
     // row, but a partial pair attempt — register-without-claim, the box

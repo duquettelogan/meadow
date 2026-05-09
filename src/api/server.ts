@@ -1322,14 +1322,31 @@ app.delete(
         return;
       }
 
+      // Look up the device's token first — for paired boxes, this is
+      // the box's hardware_id (set during /pairing/claim-by-code). We
+      // need it so the pairing_codes sweep below can ALSO catch any
+      // unclaimed-or-orphaned rows for the same hardware_id, not just
+      // rows that happen to point at this device_id. Without that
+      // breadth, a half-completed earlier pair attempt can leave a
+      // row behind that breaks the box's next re-pair (Logan's
+      // alpha-test bug: "POST /api/v1/pairing/register returns
+      // 'code already claimed' on re-pair after device delete").
+      const dev = await client.query(
+        'SELECT device_token FROM devices WHERE id = $1',
+        [deviceId],
+      );
+      const hardwareId = dev.rows[0]?.device_token as string | undefined;
+
       // Pairing codes can reference EITHER the device directly OR an
-      // api_key for this device. Catch both before deleting api_keys
-      // (otherwise a pairing_code → api_key FK would block).
+      // api_key for this device OR (defensive) any row tagged with
+      // the same hardware_id. Catch all three before deleting
+      // api_keys (otherwise a pairing_code → api_key FK would block).
       await client.query(
         `DELETE FROM pairing_codes
          WHERE device_id = $1
-            OR api_key_id IN (SELECT id FROM api_keys WHERE device_id = $1)`,
-        [deviceId],
+            OR api_key_id IN (SELECT id FROM api_keys WHERE device_id = $1)
+            OR hardware_id = $2`,
+        [deviceId, hardwareId ?? null],
       );
       await client.query(
         'DELETE FROM api_keys WHERE device_id = $1',
