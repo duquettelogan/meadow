@@ -5,8 +5,13 @@ import { startScheduler, stopScheduler } from './intel/updater';
 import { startDnsServer, stopDnsServer } from './dns/udp-server';
 import { startHeartbeat, stopHeartbeat } from './box/heartbeat';
 import { startDiscovery, stopDiscovery } from './box/discover';
-import { loadBoxContext } from './box/context';
+import { loadBoxContext, getBoxContext } from './box/context';
 import { startPolicySync, stopPolicySync } from './box/policy-sync';
+import {
+  startBlockReporter,
+  stopBlockReporter,
+  setApiKeyGetter,
+} from './box/block-reporter';
 import {
   startOfflineAlertWatcher,
   stopOfflineAlertWatcher,
@@ -53,6 +58,11 @@ async function main() {
   if (isBoxMode()) {
     await loadBoxContext();
     startPolicySync();
+    // Block events: 30s-batched POST /box/blocks. The reporter reads
+    // the api_key via this getter so a mid-process re-pair (api_key
+    // rotation by refreshBoxPolicy) lands on the next flush.
+    setApiKeyGetter(() => getBoxContext()?.api_key ?? null);
+    startBlockReporter();
   }
 
   // Start the box-side heartbeat after DNS is up. No-op if state.json
@@ -80,6 +90,7 @@ async function main() {
     stopHeartbeat();
     stopDiscovery();
     stopPolicySync();
+    stopBlockReporter();
     stopOfflineAlertWatcher();
     await stopDnsServer().catch(() => {});
     server.close(() => process.exit(0));

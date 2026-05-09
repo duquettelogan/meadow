@@ -47,6 +47,10 @@ process.env.OFFLINE_ALERTS_DISABLED = '1';
 // refreshBoxPolicy() directly when they exercise box mode.
 process.env.POLICY_SYNC_DISABLED = '1';
 
+// Box-side block-reporter flush timer — tests drive flushOnce()
+// directly so they can assert on what gets pushed.
+process.env.BLOCK_REPORTER_DISABLED = '1';
+
 // Close the connection pool + Redis client after all tests so the
 // process can exit cleanly.
 afterAll(async () => {

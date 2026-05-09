@@ -1,15 +1,33 @@
 import { db } from '../db/connection';
+import { isBoxMode } from '../mode';
+import { recordBlock as recordBlockToBoxQueue } from '../box/block-reporter';
 
 /**
  * Increment the block counter for a given child + category.
- * One row per (child_profile_id, day, category). No domains stored.
  *
- * This replaces dns_events for blocks. Privacy-minimal: aggregated counts only.
+ * Mode-aware:
+ *   - api mode: writes directly to PG block_counters (legacy path,
+ *               still used by the cloud-side resolver tests + any
+ *               direct /api/v1/resolve callers).
+ *   - box mode: enqueues to the in-memory block-reporter queue
+ *               (src/box/block-reporter.ts), which batches up and
+ *               flushes to POST /api/v1/box/blocks every 30s.
+ *
+ * Both paths are fire-and-forget: a counter failure must never break
+ * a DNS query.
  */
 export async function incrementBlockCounter(
   childProfileId: string,
-  category: string
+  category: string,
 ): Promise<void> {
+  if (isBoxMode()) {
+    try {
+      recordBlockToBoxQueue(childProfileId, category);
+    } catch (err) {
+      console.error('[counters] box-queue enqueue failed:', err);
+    }
+    return;
+  }
   try {
     await db.query(
       `
