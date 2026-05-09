@@ -10,14 +10,22 @@ import {
   stopOfflineAlertWatcher,
 } from './workers/box-offline-watcher';
 import { app } from './api/server';
+import { getMode, isBoxMode } from './mode';
 
 const PORT = Number(process.env.PORT) || 3000;
 
 async function main() {
-  console.log('Starting Meadow...');
-  await testConnection();
-  console.log('Database connected.');
-  await assertSchemaInPlace();
+  console.log(`Starting Meadow (mode=${getMode()})...`);
+  if (isBoxMode()) {
+    // Box mode: no Postgres at all. Filter policy comes from the cloud
+    // API (PRs 3 + 4 wire that up); block events go back the same way.
+    // Skip schema probe + the offline-alert watcher (server-side only).
+    console.log('[startup] box mode — skipping DB connect, schema probe, offline-alert watcher');
+  } else {
+    await testConnection();
+    console.log('Database connected.');
+    await assertSchemaInPlace();
+  }
   await connectCache();
   await loadBlocklist();
   startScheduler();
@@ -47,7 +55,10 @@ async function main() {
 
   // Server-side: hourly silent-box check that emails the family when
   // a box has had no heartbeat in >24h. No-op unless OFFLINE_ALERTS_DISABLED=1.
-  startOfflineAlertWatcher();
+  // Box mode never runs this (no DB to query).
+  if (!isBoxMode()) {
+    startOfflineAlertWatcher();
+  }
 
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Meadow API running on http://localhost:${PORT}`);
@@ -99,6 +110,7 @@ const REQUIRED_TABLES = [
 ];
 
 async function assertSchemaInPlace(): Promise<void> {
+  if (isBoxMode()) return; // never called from box-mode boot path; defense in depth.
   const result = await db.query(
     `SELECT tablename FROM pg_tables
      WHERE schemaname = 'public' AND tablename = ANY($1::text[])`,

@@ -1,7 +1,40 @@
 import { Pool } from 'pg';
 import dotenv from 'dotenv';
+import { isBoxMode } from '../mode';
 
 dotenv.config();
+
+/**
+ * Box-mode shim.
+ *
+ * In box-mode (the on-prem Pi) the process has no Postgres at all —
+ * filter policy comes from the cloud API, block events go back up the
+ * same way. The pg.Pool is never constructed (no DATABASE_URL needed,
+ * no idle TLS connections to maintain), and any code path that still
+ * tries to call db.query() or db.connect() throws loudly so we catch
+ * a missed refactor early instead of silently swallowing data.
+ *
+ * After PRs 3 & 4 land, no box-mode code path should reach this proxy.
+ */
+export function boxModeProxy(): Pool {
+  const trap = (op: string) => () => {
+    throw new Error(
+      `db.${op}() called in box mode — the box never touches Postgres ` +
+        `(MEADOW_MODE=box). This is a missed refactor; the call site ` +
+        `should be using the cloud API instead.`,
+    );
+  };
+  return new Proxy(
+    {},
+    {
+      get(_t, prop: string) {
+        if (prop === 'on') return () => undefined; // swallow .on('error')
+        if (prop === 'end') return () => Promise.resolve();
+        return trap(prop);
+      },
+    },
+  ) as unknown as Pool;
+}
 
 /**
  * Postgres connection pool.
@@ -56,20 +89,27 @@ const intEnv = (name: string, fallback: number): number => {
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 };
 
-export const db = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  max: intEnv('PGPOOL_MAX', 10),
-  min: intEnv('PGPOOL_MIN', 2),
-  idleTimeoutMillis: intEnv('PGPOOL_IDLE_MS', 30_000),
-  connectionTimeoutMillis: intEnv('PGPOOL_CONNECT_TIMEOUT_MS', 5_000),
-  query_timeout: intEnv('PGPOOL_QUERY_TIMEOUT_MS', 10_000),
-});
+export const db: Pool = isBoxMode()
+  ? boxModeProxy()
+  : new Pool({
+      connectionString: process.env.DATABASE_URL,
+      max: intEnv('PGPOOL_MAX', 10),
+      min: intEnv('PGPOOL_MIN', 2),
+      idleTimeoutMillis: intEnv('PGPOOL_IDLE_MS', 30_000),
+      connectionTimeoutMillis: intEnv('PGPOOL_CONNECT_TIMEOUT_MS', 5_000),
+      query_timeout: intEnv('PGPOOL_QUERY_TIMEOUT_MS', 10_000),
+    });
 
-db.on('error', (err) => {
-  console.error('Database connection error:', err);
-});
+if (!isBoxMode()) {
+  db.on('error', (err) => {
+    console.error('Database connection error:', err);
+  });
+}
 
 export async function testConnection() {
+  if (isBoxMode()) {
+    return { now: new Date(), mode: 'box' };
+  }
   const client = await db.connect();
   const result = await client.query('SELECT NOW()');
   client.release();
