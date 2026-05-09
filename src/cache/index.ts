@@ -84,3 +84,28 @@ export async function invalidateDevice(deviceToken: string): Promise<void> {
     await client.del(keys);
   }
 }
+
+/**
+ * Generic JSON-blob cache. Used by the box-context loader so the box
+ * can survive an API outage at boot by serving the last known-good
+ * policy snapshot from Redis.
+ */
+export async function cacheGetJson<T>(key: string): Promise<T | null> {
+  await ensureConnected();
+  const raw = await client.get(key);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
+export async function cacheSetJson<T>(
+  key: string,
+  value: T,
+  ttlSeconds: number,
+): Promise<void> {
+  await ensureConnected();
+  await client.set(key, JSON.stringify(value), { EX: ttlSeconds });
+}

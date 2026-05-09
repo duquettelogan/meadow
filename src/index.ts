@@ -5,6 +5,8 @@ import { startScheduler, stopScheduler } from './intel/updater';
 import { startDnsServer, stopDnsServer } from './dns/udp-server';
 import { startHeartbeat, stopHeartbeat } from './box/heartbeat';
 import { startDiscovery, stopDiscovery } from './box/discover';
+import { loadBoxContext } from './box/context';
+import { startPolicySync, stopPolicySync } from './box/policy-sync';
 import {
   startOfflineAlertWatcher,
   stopOfflineAlertWatcher,
@@ -45,6 +47,14 @@ async function main() {
     console.error('[dns] continuing without UDP DNS — API still functional.');
   }
 
+  // Box-mode: prime the API-backed context cache and start the
+  // 5-minute refresh loop. Heartbeat + discovery (below) need a
+  // populated context to know what api_key to send.
+  if (isBoxMode()) {
+    await loadBoxContext();
+    startPolicySync();
+  }
+
   // Start the box-side heartbeat after DNS is up. No-op if state.json
   // doesn't exist (i.e. running as the API server, not a paired box).
   startHeartbeat();
@@ -69,6 +79,7 @@ async function main() {
     stopScheduler();
     stopHeartbeat();
     stopDiscovery();
+    stopPolicySync();
     stopOfflineAlertWatcher();
     await stopDnsServer().catch(() => {});
     server.close(() => process.exit(0));
