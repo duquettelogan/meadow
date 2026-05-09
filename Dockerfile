@@ -32,6 +32,12 @@ RUN npm ci --omit=dev && npm cache clean --force
 
 COPY --from=builder /app/dist ./dist
 
+# Static data shipped with the API image:
+#   data/oui.txt — IEEE OUI prefixes for src/box/oui.ts. The path is
+#   resolved relative to dist/box/__dirname (../../data/oui.txt → /app/data/oui.txt).
+#   Without this COPY the box-discover loop logs ENOENT on every tick.
+COPY data ./data
+
 # Run as a non-root user. Built-in `node` user (uid 1000) is fine.
 USER node
 
