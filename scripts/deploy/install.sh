@@ -347,25 +347,42 @@ install_unit() {
 install_unit "meadow-bootstrap.service"
 install_unit "meadow.service"
 systemctl daemon-reload
-# Enable bootstrap first (meadow Requires + After it).
+# Enable bootstrap first (meadow Requires + After it). enable only
+# wires up next-boot; start is what we use to bring units up now.
 systemctl enable -q meadow-bootstrap.service
 systemctl enable -q "$SERVICE_NAME"
-systemctl restart "$SERVICE_NAME"
-ok "meadow-bootstrap.service + $SERVICE_NAME installed and started"
 
-step "Waiting for service to come up"
-for i in $(seq 1 30); do
-  if curl -sf http://localhost:3000/health >/dev/null 2>&1; then
-    ok "service is healthy"
-    break
-  fi
-  if [ "$i" = "30" ]; then
-    warn "service did not respond on /health — check logs:"
-    warn "  journalctl -u $SERVICE_NAME -n 50"
-    exit 1
-  fi
-  sleep 1
-done
+if [ "$MODE" = "box" ]; then
+  # Box mode: meadow-bootstrap is Type=oneshot whose ExecStart pairs
+  # the box with the cloud. Pairing depends on the operator opening
+  # the dashboard and entering the code shown on meadow.local — could
+  # take seconds, could take an hour. Never block install.sh on it.
+  # `systemctl start --no-block` enqueues the job and returns
+  # immediately; bootstrap runs in the background, meadow.service
+  # auto-starts via Requires/After the moment bootstrap reaches active.
+  systemctl start --no-block meadow-bootstrap.service
+  ok "meadow-bootstrap.service kicked off in the background"
+  ok "(meadow.service auto-starts once bootstrap finishes pairing)"
+else
+  # API mode: no human-in-the-loop dependency. Synchronous restart +
+  # wait for /health is the right shape.
+  systemctl restart "$SERVICE_NAME"
+  ok "$SERVICE_NAME installed and started"
+
+  step "Waiting for service to come up"
+  for i in $(seq 1 30); do
+    if curl -sf http://localhost:3000/health >/dev/null 2>&1; then
+      ok "service is healthy"
+      break
+    fi
+    if [ "$i" = "30" ]; then
+      warn "service did not respond on /health — check logs:"
+      warn "  journalctl -u $SERVICE_NAME -n 50"
+      exit 1
+    fi
+    sleep 1
+  done
+fi
 
 step "Done"
 cat <<EOF
