@@ -21,6 +21,7 @@ import * as os from 'os';
 import { getBoxContext } from './context';
 import { getCategorySize } from '../cache/blocklist';
 import { CATEGORIES } from '../cache/blocklist';
+import { reportAuthFailure, reportAuthSuccess } from './repair';
 
 const API_URL = process.env.API_URL || process.env.MEADOW_API_URL || 'http://localhost:3000';
 // 60s default (was 5 minutes). Dashboard's "is the box online?" check
@@ -67,10 +68,19 @@ export async function sendHeartbeat(): Promise<boolean> {
     });
     clearTimeout(timeoutId);
 
+    if (res.status === 401) {
+      // Permanent-credential signal — feed the shared repair counter
+      // so two consecutive 401s (across heartbeat / policy-sync /
+      // block-reporter) self-trigger a re-pair instead of looping
+      // forever on a dead api_key. See src/box/repair.ts.
+      reportAuthFailure('heartbeat');
+      return false;
+    }
     if (!res.ok) {
       console.error(`[heartbeat] API responded ${res.status}`);
       return false;
     }
+    reportAuthSuccess();
     return true;
   } catch (err) {
     // Don't include the error object — fetch errors can include the URL,

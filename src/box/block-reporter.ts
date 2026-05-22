@@ -27,6 +27,8 @@
  * test-driven harness.
  */
 
+import { reportAuthFailure, reportAuthSuccess } from './repair';
+
 const HOUR_MS = 60 * 60 * 1000;
 const MAX_BUCKETS = 10_000;
 
@@ -158,12 +160,14 @@ export async function flushOnce(): Promise<number> {
     console.error(
       '[block-reporter] /box/blocks 401 — api_key revoked? holding queue',
     );
+    reportAuthFailure('block-reporter');
     return 0;
   }
   if (!res.ok) {
     console.warn(`[block-reporter] /box/blocks returned ${res.status}`);
     return 0;
   }
+  reportAuthSuccess();
 
   // Success — clear the snapshot's keys from the queue. Anything that
   // got recorded DURING the flush stays in the queue for the next
