@@ -243,7 +243,10 @@ async function postDiscovered(
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), POST_TIMEOUT_MS);
   try {
-    const res = await fetch(`${API_URL}/api/v1/devices/discovered`, {
+    // Same as heartbeat — use /api/v1/box/* path for consistency with
+    // the rest of the cloud-sync surface. Cloud handler is the same;
+    // legacy /api/v1/devices/discovered is kept around for back-compat.
+    const res = await fetch(`${API_URL}/api/v1/box/discovered`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

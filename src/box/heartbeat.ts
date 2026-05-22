@@ -44,7 +44,11 @@ export async function sendHeartbeat(): Promise<boolean> {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
-    const res = await fetch(`${API_URL}/api/v1/devices/heartbeat`, {
+    // Use the /api/v1/box/* surface (same handler on the cloud, just
+    // the box-aligned path) so we stay consistent with /box/policy +
+    // /box/blocks + /box/network-status. The legacy
+    // /api/v1/devices/heartbeat path still exists for back-compat.
+    const res = await fetch(`${API_URL}/api/v1/box/heartbeat`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

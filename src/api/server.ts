@@ -1174,50 +1174,66 @@ app.get('/api/v1/devices', requireParentAuth, async (req, res) => {
 // On insert, device_token is generated server-side as `disc_<32 hex>`
 // — discovered devices don't authenticate (nobody has the corresponding
 // api_key), the column just satisfies the NOT NULL UNIQUE constraint.
+// Discovered-device handler. Mounted at both the historical
+// /api/v1/devices/discovered path AND the box-aligned
+// /api/v1/box/discovered. The box's discover loop calls the latter
+// going forward (see src/box/discover.ts); the legacy path is kept
+// so older field deployments keep working.
+const discoveredHandler: import('express').RequestHandler = async (
+  req,
+  res,
+) => {
+  const { mac, hostname, manufacturer } = req.body as {
+    mac: string;
+    hostname?: string;
+    manufacturer?: string;
+  };
+  try {
+    const newToken = `disc_${crypto.randomBytes(16).toString('hex')}`;
+    const result = await db.query(
+      `INSERT INTO devices
+         (family_id, mac, hostname, manufacturer, platform, device_token, last_seen)
+       VALUES ($1, $2, $3, $4, 'discovered', $5, NOW())
+       ON CONFLICT (family_id, mac) DO UPDATE SET
+         hostname = COALESCE(EXCLUDED.hostname, devices.hostname),
+         manufacturer = COALESCE(EXCLUDED.manufacturer, devices.manufacturer),
+         last_seen = NOW()
+       RETURNING id, family_id, mac, hostname, manufacturer, platform,
+                 last_seen, child_profile_id, (xmax = 0) AS inserted`,
+      [req.device!.family_id, mac, hostname ?? null, manufacturer ?? null, newToken]
+    );
+    const row = result.rows[0];
+    // Audit only on first sighting — repeated upserts are noise.
+    if (row.inserted) {
+      audit(req, 'device.discovered', {
+        target_kind: 'device',
+        target_id: row.id,
+        metadata: {
+          mac,
+          hostname: hostname ?? null,
+          manufacturer: manufacturer ?? null,
+        },
+      });
+    }
+    delete row.inserted;
+    res.status(200).json(row);
+  } catch (err) {
+    console.error('device discovered failed:', err);
+    res.status(500).json({ error: 'internal server error' });
+  }
+};
+
 app.post(
   '/api/v1/devices/discovered',
   requireDeviceAuth,
   validateBody(DiscoveredDeviceBody),
-  async (req, res) => {
-    const { mac, hostname, manufacturer } = req.body as {
-      mac: string;
-      hostname?: string;
-      manufacturer?: string;
-    };
-    try {
-      const newToken = `disc_${crypto.randomBytes(16).toString('hex')}`;
-      const result = await db.query(
-        `INSERT INTO devices
-           (family_id, mac, hostname, manufacturer, platform, device_token, last_seen)
-         VALUES ($1, $2, $3, $4, 'discovered', $5, NOW())
-         ON CONFLICT (family_id, mac) DO UPDATE SET
-           hostname = COALESCE(EXCLUDED.hostname, devices.hostname),
-           manufacturer = COALESCE(EXCLUDED.manufacturer, devices.manufacturer),
-           last_seen = NOW()
-         RETURNING id, family_id, mac, hostname, manufacturer, platform,
-                   last_seen, child_profile_id, (xmax = 0) AS inserted`,
-        [req.device!.family_id, mac, hostname ?? null, manufacturer ?? null, newToken]
-      );
-      const row = result.rows[0];
-      // Audit only on first sighting — repeated upserts are noise.
-      if (row.inserted) {
-        audit(req, 'device.discovered', {
-          target_kind: 'device',
-          target_id: row.id,
-          metadata: {
-            mac,
-            hostname: hostname ?? null,
-            manufacturer: manufacturer ?? null,
-          },
-        });
-      }
-      delete row.inserted;
-      res.status(200).json(row);
-    } catch (err) {
-      console.error('device discovered failed:', err);
-      res.status(500).json({ error: 'internal server error' });
-    }
-  },
+  discoveredHandler,
+);
+app.post(
+  '/api/v1/box/discovered',
+  requireDeviceAuth,
+  validateBody(DiscoveredDeviceBody),
+  discoveredHandler,
 );
 
 // Cosmetic update of a device — rename (hostname) and/or assign to a
@@ -1580,38 +1596,53 @@ app.get(
 // Authenticated with the device API key — same auth as /resolve. Privacy
 // posture: payload is bounded by HeartbeatBody validation; no per-query
 // data, no domains, no counts.
+// Heartbeat handler — mounted at both /api/v1/devices/heartbeat
+// (legacy, kept for in-field deployments still pointing here) and
+// /api/v1/box/heartbeat (the box-aligned path that src/box/heartbeat.ts
+// targets going forward).
+const heartbeatHandler: import('express').RequestHandler = async (
+  req,
+  res,
+) => {
+  try {
+    // Reset offline_alert_sent_at on every heartbeat — this is the
+    // "the box is back" signal that lets the next 24h-silent stretch
+    // trigger a fresh email instead of being suppressed forever after
+    // the first alert. See src/workers/box-offline-watcher.ts.
+    await db.query(
+      `UPDATE devices
+       SET last_seen = NOW(),
+           last_health_payload = $2::jsonb,
+           offline_alert_sent_at = NULL
+       WHERE id = $1`,
+      [req.device!.device_id, JSON.stringify(req.body ?? {})],
+    );
+    // Heartbeats fire every 5 min; we audit only every Nth to avoid
+    // flooding audit_log. Sample roughly 1-in-12 (~hourly per device).
+    if (Math.random() < 0.083) {
+      audit(req, 'box.heartbeat', {
+        target_kind: 'device',
+        target_id: req.device!.device_id,
+      });
+    }
+    res.status(204).end();
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'internal server error' });
+  }
+};
+
 app.post(
   '/api/v1/devices/heartbeat',
   requireDeviceAuth,
   validateBody(HeartbeatBody),
-  async (req, res) => {
-    try {
-      // Reset offline_alert_sent_at on every heartbeat — this is the
-      // "the box is back" signal that lets the next 24h-silent stretch
-      // trigger a fresh email instead of being suppressed forever after
-      // the first alert. See src/workers/box-offline-watcher.ts.
-      await db.query(
-        `UPDATE devices
-         SET last_seen = NOW(),
-             last_health_payload = $2::jsonb,
-             offline_alert_sent_at = NULL
-         WHERE id = $1`,
-        [req.device!.device_id, JSON.stringify(req.body ?? {})],
-      );
-      // Heartbeats fire every 5 min; we audit only every Nth to avoid
-      // flooding audit_log. Sample roughly 1-in-12 (~hourly per device).
-      if (Math.random() < 0.083) {
-        audit(req, 'box.heartbeat', {
-          target_kind: 'device',
-          target_id: req.device!.device_id,
-        });
-      }
-      res.status(204).end();
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ error: 'internal server error' });
-    }
-  },
+  heartbeatHandler,
+);
+app.post(
+  '/api/v1/box/heartbeat',
+  requireDeviceAuth,
+  validateBody(HeartbeatBody),
+  heartbeatHandler,
 );
 
 // ---------- Box network status ----------

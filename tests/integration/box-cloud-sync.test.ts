@@ -398,3 +398,97 @@ describe('GET /api/v1/box/device-children', () => {
     expect(r.status).toBe(401);
   });
 });
+
+describe('POST /api/v1/box/heartbeat (alias of /devices/heartbeat)', () => {
+  it('accepts the same body shape and updates devices.last_seen + last_health_payload', async () => {
+    const f = await makeFamily();
+    const box = await pairBox(f.token);
+
+    const r = await request(app)
+      .post('/api/v1/box/heartbeat')
+      .set('Authorization', `Bearer ${box.api_key}`)
+      .send({
+        ts: Math.floor(Date.now() / 1000),
+        uptime_seconds: 1234,
+        free_memory_mb: 256,
+        box_version: '1.0.0',
+      });
+    expect(r.status).toBe(204);
+
+    const row = await db.query(
+      'SELECT last_seen, last_health_payload FROM devices WHERE id = $1',
+      [box.device_id],
+    );
+    expect(row.rows[0].last_seen).toBeTruthy();
+    expect(row.rows[0].last_health_payload.uptime_seconds).toBe(1234);
+    expect(row.rows[0].last_health_payload.box_version).toBe('1.0.0');
+  });
+
+  it('resets offline_alert_sent_at on heartbeat (same as the legacy path)', async () => {
+    const f = await makeFamily();
+    const box = await pairBox(f.token);
+    await db.query(
+      `UPDATE devices SET offline_alert_sent_at = NOW() - INTERVAL '2 hours'
+       WHERE id = $1`,
+      [box.device_id],
+    );
+
+    const r = await request(app)
+      .post('/api/v1/box/heartbeat')
+      .set('Authorization', `Bearer ${box.api_key}`)
+      .send({ ts: Math.floor(Date.now() / 1000) });
+    expect(r.status).toBe(204);
+
+    const row = await db.query(
+      'SELECT offline_alert_sent_at FROM devices WHERE id = $1',
+      [box.device_id],
+    );
+    expect(row.rows[0].offline_alert_sent_at).toBeNull();
+  });
+
+  it('rejects requests with no api key (401)', async () => {
+    const r = await request(app)
+      .post('/api/v1/box/heartbeat')
+      .send({ ts: Math.floor(Date.now() / 1000) });
+    expect(r.status).toBe(401);
+  });
+});
+
+describe('POST /api/v1/box/discovered (alias of /devices/discovered)', () => {
+  it('upserts the device row on the box\'s family', async () => {
+    const f = await makeFamily();
+    const box = await pairBox(f.token);
+
+    const r = await request(app)
+      .post('/api/v1/box/discovered')
+      .set('Authorization', `Bearer ${box.api_key}`)
+      .send({ mac: '22:33:44:55:66:77', hostname: 'kid-laptop' });
+    expect(r.status).toBe(200);
+    expect(r.body.mac).toBe('22:33:44:55:66:77');
+    expect(r.body.hostname).toBe('kid-laptop');
+    expect(r.body.family_id).toBe(f.family_id);
+    expect(r.body.platform).toBe('discovered');
+  });
+
+  it('is idempotent on (family_id, mac) — second call updates instead of insert', async () => {
+    const f = await makeFamily();
+    const box = await pairBox(f.token);
+    const a = await request(app)
+      .post('/api/v1/box/discovered')
+      .set('Authorization', `Bearer ${box.api_key}`)
+      .send({ mac: '33:33:33:33:33:33' });
+    const b = await request(app)
+      .post('/api/v1/box/discovered')
+      .set('Authorization', `Bearer ${box.api_key}`)
+      .send({ mac: '33:33:33:33:33:33', hostname: 'now-with-name' });
+    expect(a.body.id).toBe(b.body.id);
+    expect(b.body.hostname).toBe('now-with-name');
+  });
+
+  it('rejects requests with no api key (401)', async () => {
+    const r = await request(app)
+      .post('/api/v1/box/discovered')
+      .send({ mac: 'aa:aa:aa:aa:aa:aa' });
+    expect(r.status).toBe(401);
+  });
+});
