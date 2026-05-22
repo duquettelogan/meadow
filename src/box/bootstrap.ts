@@ -274,15 +274,36 @@ async function main() {
         err(`loadBoxContext after pairing failed: ${(ctxErr as Error).message}`);
       }
 
-      // Run the DHCP-handoff network setup. This blocks until the 30s
-      // conflict check finishes. If a conflict is detected, dnsmasq is
-      // NOT started; the meadow.local page will surface the conflict
-      // UI. Either way we proceed to LED + post-pair hold so the
-      // operator sees something useful.
+      // Run the DHCP-handoff network setup. Best-effort: bootstrap's
+      // contract is "pair + write box.env". Once that's done, this
+      // service should exit cleanly so meadow.service can start. The
+      // network handoff is a separate concern — if it fails (no
+      // Ethernet, DHCP conflict, dnsmasq stuck), the operator can
+      // hit "Retry network setup" on meadow.local later. Hard-cap
+      // the call at 60s so a wedged setupNetworkMode (e.g., the
+      // detect call never returning) can't block bootstrap forever
+      // and trap meadow.service in a Requires-wait (Pi alpha bug 7,
+      // May 22, observed on Wi-Fi-only Pi with no Ethernet).
       log('running network mode setup...');
+      const NET_SETUP_HARD_TIMEOUT_MS = 60_000;
       try {
-        const outcome = await setupNetworkMode();
-        if (outcome.conflict_detected) {
+        const outcome = await Promise.race<
+          { conflict_detected: boolean } | { timed_out: true }
+        >([
+          setupNetworkMode(),
+          new Promise<{ timed_out: true }>((resolve) =>
+            setTimeout(
+              () => resolve({ timed_out: true }),
+              NET_SETUP_HARD_TIMEOUT_MS,
+            ),
+          ),
+        ]);
+        if ('timed_out' in outcome) {
+          err(
+            `network setup did not finish within ${Math.floor(NET_SETUP_HARD_TIMEOUT_MS / 1000)}s — moving on; retry from meadow.local`,
+          );
+          setStatus('paired');
+        } else if (outcome.conflict_detected) {
           err(
             'DHCP conflict detected — leaving dnsmasq off; pairing page will surface retry UI',
           );

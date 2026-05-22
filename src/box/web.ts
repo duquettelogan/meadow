@@ -116,10 +116,28 @@ export function setStatus(s: WebStatus): void {
 export function stopPairingWeb(): Promise<void> {
   return new Promise((resolve) => {
     if (!server) return resolve();
-    server.close(() => {
+    const srv = server;
+    // server.close() waits for ALL open sockets (including idle
+    // keepalives) to close before calling back. The meadow.local
+    // page polls every 5s via <meta refresh>, so on a Pi where the
+    // operator left the pairing page open, server.close() hangs
+    // forever and bootstrap stays in systemd "activating (start)"
+    // indefinitely (Pi alpha bug 7, May 22). Force-close any
+    // outstanding connections to unblock the callback, and arm a
+    // 5s hard timeout in case server.close itself goes weird.
+    const finished = (): void => {
       server = null;
       resolve();
+    };
+    const hardTimeout = setTimeout(finished, 5000);
+    if (typeof hardTimeout.unref === 'function') hardTimeout.unref();
+    srv.close(() => {
+      clearTimeout(hardTimeout);
+      finished();
     });
+    if (typeof (srv as { closeAllConnections?: () => void }).closeAllConnections === 'function') {
+      (srv as { closeAllConnections: () => void }).closeAllConnections();
+    }
   });
 }
 
