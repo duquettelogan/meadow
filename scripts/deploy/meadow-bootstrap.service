@@ -7,6 +7,10 @@ After=network-online.target time-sync.target
 Wants=network-online.target time-sync.target
 # meadow.service Requires + After this unit so the DNS server only
 # starts once /etc/meadow/box.env has a device_id.
+# StartLimit* are [Unit]-level directives in systemd 230+. Previously
+# placed in [Service] where systemd silently ignored them.
+StartLimitBurst=5
+StartLimitIntervalSec=300
 
 [Service]
 Type=oneshot
@@ -46,14 +50,14 @@ ProtectControlGroups=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictNamespaces=true
 LockPersonality=true
-MemoryDenyWriteExecute=true
+# MemoryDenyWriteExecute removed — V8 needs W^X transitions for JIT;
+# enabling it sigtraps Node on the first JIT compile (~80ms after
+# boot). Confirmed on Pi 5 / Pi OS Lite 64-bit (May 2026 alpha test).
 
 # If pairing fails (code expired, network out), let systemd retry a few
 # times before giving up.
 Restart=on-failure
 RestartSec=15s
-StartLimitBurst=5
-StartLimitIntervalSec=300
 
 [Install]
 WantedBy=multi-user.target

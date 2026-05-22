@@ -233,7 +233,13 @@ fi
 
 step "Setting up environment file"
 mkdir -p "$ENV_DIR"
-chmod 750 "$ENV_DIR"
+# 0700 owned by the meadow user — bootstrap (running unprivileged)
+# needs to create $ENV_DIR/box.env.tmp during the atomic write-and-
+# rename in src/box/bootstrap.ts writeBoxEnv(). Previously root:root
+# 0750 which blocked the tmp-file create (EACCES). The directory
+# holding mk_… secrets shouldn't be group-readable anyway.
+chown "$SYSTEM_USER:$SYSTEM_USER" "$ENV_DIR"
+chmod 0700 "$ENV_DIR"
 
 if [ ! -f "$ENV_FILE" ]; then
   # Fresh install — generate everything.
@@ -319,22 +325,33 @@ else
   ok "skipped (box mode — schema lives on the cloud API)"
 fi
 
-step "Installing systemd service"
-SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
+step "Installing systemd services"
 SCRIPT_DIR="$( cd -- "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd )"
 
-if [ -f "$SCRIPT_DIR/meadow.service" ]; then
-  cp "$SCRIPT_DIR/meadow.service" "$SERVICE_PATH"
-elif [ -f "$INSTALL_DIR/scripts/deploy/meadow.service" ]; then
-  cp "$INSTALL_DIR/scripts/deploy/meadow.service" "$SERVICE_PATH"
-else
-  die "meadow.service file not found"
-fi
-chmod 644 "$SERVICE_PATH"
+# meadow.service Requires meadow-bootstrap.service, so both unit
+# files must land in /etc/systemd/system. Previously only the main
+# unit was copied → `Unit meadow-bootstrap.service not found.`
+install_unit() {
+  local unit="$1"
+  local dest="/etc/systemd/system/${unit}"
+  if [ -f "$SCRIPT_DIR/${unit}" ]; then
+    cp "$SCRIPT_DIR/${unit}" "$dest"
+  elif [ -f "$INSTALL_DIR/scripts/deploy/${unit}" ]; then
+    cp "$INSTALL_DIR/scripts/deploy/${unit}" "$dest"
+  else
+    die "${unit} file not found"
+  fi
+  chmod 644 "$dest"
+}
+
+install_unit "meadow-bootstrap.service"
+install_unit "meadow.service"
 systemctl daemon-reload
+# Enable bootstrap first (meadow Requires + After it).
+systemctl enable -q meadow-bootstrap.service
 systemctl enable -q "$SERVICE_NAME"
 systemctl restart "$SERVICE_NAME"
-ok "$SERVICE_NAME installed and started"
+ok "meadow-bootstrap.service + $SERVICE_NAME installed and started"
 
 step "Waiting for service to come up"
 for i in $(seq 1 30); do

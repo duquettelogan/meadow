@@ -11,6 +11,11 @@ Wants=network-online.target time-sync.target
 # once a device_id exists (otherwise blocks would have no child to
 # attribute to).
 Requires=meadow-bootstrap.service postgresql.service redis-server.service
+# StartLimit* are [Unit]-level directives in systemd 230+. Previously
+# placed in [Service] where they were silently ignored (no rate limit
+# applied → flapping restarts under a hard fault).
+StartLimitBurst=5
+StartLimitIntervalSec=60
 
 [Service]
 Type=simple
@@ -21,8 +26,6 @@ EnvironmentFile=/etc/meadow/meadow.env
 ExecStart=/usr/bin/npx ts-node src/index.ts
 Restart=on-failure
 RestartSec=3
-StartLimitBurst=5
-StartLimitIntervalSec=60
 
 # Logging
 StandardOutput=journal
