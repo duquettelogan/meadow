@@ -23,8 +23,16 @@ import { getCategorySize } from '../cache/blocklist';
 import { CATEGORIES } from '../cache/blocklist';
 
 const API_URL = process.env.API_URL || process.env.MEADOW_API_URL || 'http://localhost:3000';
+// 60s default (was 5 minutes). Dashboard's "is the box online?" check
+// is a freshness comparison against devices.last_seen; with a 5-min
+// cadence the box appears offline for most of every 5-min window
+// regardless of where the dashboard sets its threshold. 60s strikes a
+// balance — fresh enough for any reasonable offline window, and at
+// alpha cardinality (single-digit families) the cloud load is trivial
+// (a 1-row UPDATE per beat). Override via HEARTBEAT_INTERVAL_MS for
+// self-host setups that want a longer cadence.
 const HEARTBEAT_INTERVAL_MS = parseInt(
-  process.env.HEARTBEAT_INTERVAL_MS ?? String(5 * 60 * 1000),
+  process.env.HEARTBEAT_INTERVAL_MS ?? String(60_000),
   10,
 );
 const BOX_VERSION = process.env.BOX_VERSION || '1.0.0';
