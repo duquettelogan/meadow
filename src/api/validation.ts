@@ -40,6 +40,10 @@ const platform = z.enum([
   'switch',
   'smarttv',
   'router',
+  // 'meadow_box' is what bootstrap.ts (the Pi's own pair flow) sends
+  // for the box itself. Snake-case for consistency with the rest of
+  // the snake_case identifiers stored in DB rows.
+  'meadow_box',
   'other',
 ]);
 

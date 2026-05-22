@@ -24,7 +24,7 @@
  *   API_URL          base URL of the Meadow API (default localhost:3000)
  *   BOX_ENV_FILE     override box.env path (default /etc/meadow/box.env)
  *   PAIRING_CODE_FILE override pairing-code path (default /var/lib/meadow/pairing-code)
- *   PLATFORM         reported platform string (default 'meadow-box')
+ *   PLATFORM         reported platform string (default 'meadow_box')
  *
  * Reset / re-pair: rm /etc/meadow/box.env /var/lib/meadow/pairing-code
  *                  && systemctl restart meadow-bootstrap
@@ -43,7 +43,11 @@ const API_URL = process.env.API_URL || 'http://localhost:3000';
 const BOX_ENV_FILE = process.env.BOX_ENV_FILE || '/etc/meadow/box.env';
 const PAIRING_CODE_FILE =
   process.env.PAIRING_CODE_FILE || '/var/lib/meadow/pairing-code';
-const PLATFORM = process.env.PLATFORM || 'meadow-box';
+// Default must match the platform enum in src/api/validation.ts —
+// 'meadow-box' (hyphen) used to fail validation at /pairing/register
+// with a 400 listing the allowed values. Snake case for consistency
+// with the rest of the snake_case identifiers we store.
+const PLATFORM = process.env.PLATFORM || 'meadow_box';
 const MACHINE_ID_PATH = '/etc/machine-id';
 const POLL_INTERVAL_MS = parseInt(
   process.env.POLL_INTERVAL_MS ?? '10000',

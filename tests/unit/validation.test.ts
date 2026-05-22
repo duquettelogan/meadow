@@ -109,6 +109,23 @@ describe('validation schemas', () => {
       ).toThrow();
     });
 
+    it('accepts meadow_box (the on-prem Pi self-identifies as this)', () => {
+      const r = RegisterDeviceBody.parse({
+        platform: 'meadow_box',
+        device_token: 'abcdef123456',
+      });
+      expect(r.platform).toBe('meadow_box');
+    });
+
+    it('rejects meadow-box with a hyphen (catches the pre-fix bootstrap default)', () => {
+      expect(() =>
+        RegisterDeviceBody.parse({
+          platform: 'meadow-box',
+          device_token: 'abcdef123456',
+        }),
+      ).toThrow();
+    });
+
     it('rejects malformed device_token', () => {
       expect(() =>
         RegisterDeviceBody.parse({
