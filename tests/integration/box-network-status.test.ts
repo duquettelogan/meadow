@@ -241,4 +241,50 @@ describe('GET /api/v1/box/health (dashboard roll-up)', () => {
       .set('Authorization', `Bearer ${b.token}`);
     expect(r.body.paired).toBe(false);
   });
+
+  it('returns the BOX even when a discovered device has a more recent last_seen', async () => {
+    // Regression for Pi alpha bug 1, May 22: /box/health used to
+    // `ORDER BY last_seen DESC LIMIT 1` across the entire family.
+    // A box that heartbeats every 60s loses the sort to any
+    // /devices/discovered row that the box's discover loop updates
+    // every 30s, so the dashboard read back a disc_<hex> device_token
+    // instead of the box's hw_<hex> and rendered "offline."
+    // Fix: filter to devices that have a live api_key (i.e., the
+    // paired box itself, not synthetic discovered rows).
+    const { token } = await makeVerifiedParent();
+    const { api_key, device_id } = await pairBoxFor(token);
+
+    // Box heartbeats once.
+    await request(app)
+      .post('/api/v1/box/heartbeat')
+      .set('Authorization', `Bearer ${api_key}`)
+      .send({ ts: Math.floor(Date.now() / 1000) });
+
+    // Then a discover hits, AFTER the heartbeat — so the discovered
+    // device's last_seen is strictly more recent than the box's.
+    await new Promise((r) => setTimeout(r, 20));
+    const disc = await request(app)
+      .post('/api/v1/box/discovered')
+      .set('Authorization', `Bearer ${api_key}`)
+      .send({ mac: 'ff:ee:dd:cc:bb:aa', hostname: 'kid-laptop' });
+    expect(disc.status).toBe(200);
+
+    const r = await request(app)
+      .get('/api/v1/box/health')
+      .set('Authorization', `Bearer ${token}`);
+    expect(r.body.paired).toBe(true);
+    // The hardware_id field is the box's device_token (hw_…), not
+    // the discovered device's synthetic disc_… token.
+    expect(r.body.hardware_id).toMatch(/^hw_/);
+    expect(r.body.hardware_id).not.toMatch(/^disc_/);
+    // And the last_heartbeat should be the box's row, not the
+    // discovered row that landed later.
+    const boxRow = await db.query(
+      'SELECT last_seen FROM devices WHERE id = $1',
+      [device_id],
+    );
+    const heartbeatTs = new Date(r.body.last_heartbeat).getTime();
+    const boxTs = new Date(boxRow.rows[0].last_seen).getTime();
+    expect(heartbeatTs).toBe(boxTs);
+  });
 });

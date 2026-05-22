@@ -1740,10 +1740,22 @@ app.get('/api/v1/box/network-status', requireParentAuth, async (req, res) => {
 // each family has at most one).
 app.get('/api/v1/box/health', requireParentAuth, async (req, res) => {
   try {
+    // Filter to the actual paired BOX — a device with a live api_key.
+    // Without this, the most-recently-active device in the family
+    // tends to be one of the /devices/discovered rows (updated every
+    // 30s by the box's discover loop), whose device_token is the
+    // synthetic disc_<hex> id rather than the box's hw_<hex>. The
+    // dashboard then sees "this isn't the box" and renders offline
+    // even though the actual box is heartbeating fine. (Pi alpha
+    // bug 1, May 22 — confirmed live.)
     const result = await db.query(
       `SELECT id, device_token, last_seen, last_health_payload, network_status
-       FROM devices
-       WHERE family_id = $1
+       FROM devices d
+       WHERE d.family_id = $1
+         AND EXISTS (
+           SELECT 1 FROM api_keys k
+           WHERE k.device_id = d.id AND k.revoked_at IS NULL
+         )
        ORDER BY last_seen DESC NULLS LAST
        LIMIT 1`,
       [req.parent!.family_id],
