@@ -34,6 +34,7 @@
 import * as fs from 'fs';
 import { cacheGetJson, cacheSetJson } from '../cache/index';
 import type { FilterPolicy } from '../policies/loader';
+import { reportAuthFailure, reportAuthSuccess } from './repair';
 
 // Resolved at call time (not module load) so tests can set
 // boxEnvFile() / apiUrl() in beforeEach without having to re-import
@@ -121,12 +122,14 @@ async function fetchPolicy(apiKey: string): Promise<PolicyResponse | null> {
       console.error(
         '[box] /box/policy returned 401 — api_key revoked? not rotating cache',
       );
+      reportAuthFailure('policy-sync');
       return null;
     }
     if (!res.ok) {
       console.error(`[box] /box/policy returned ${res.status}`);
       return null;
     }
+    reportAuthSuccess();
     return (await res.json()) as PolicyResponse;
   } catch (err) {
     console.error('[box] /box/policy fetch failed:', (err as Error).message);
